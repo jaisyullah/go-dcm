@@ -1,0 +1,87 @@
+openapi: 3.0.3
+info:
+  title: go-dcm DICOM Conversion API
+  description: API for converting images and documents to DICOM wrappers using underlying DCMTK commands (`img2dcm` and `dcmencap/pdf2dcm`).
+  version: 1.0.0
+servers:
+  - url: http://localhost:8080
+    description: Local Server
+paths:
+  /api/v1/convert/img2dcm:
+    post:
+      summary: Convert Image to DICOM
+      description: Captures JPEG or BMP files along with optional parameters to bridge with DCMTK `img2dcm`.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The JPEG or BMP image file to be converted.
+                parameters:
+                  type: string
+                  description: |
+                    JSON payload representing conversion configurations.
+                    Example:
+                    {
+                      "output_sop_class": "vl-photo",
+                      "patient_name": "Test^Patient",
+                      "keys": [
+                        "PatientName=Test^Patient"
+                      ]
+                    }
+      responses:
+        '200':
+          description: Successful Operation
+          content:
+            application/dicom:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: Bad Request (Invalid Form or JSON Parameters)
+        '500':
+          description: Conversion Error
+  /api/v1/convert/pdf2dcm:
+    post:
+      summary: Convert PDF/Document to DICOM
+      description: Captures PDF, CDA, STL, MTL, or OBJ documents to be encapsulated into a DICOM file crossing DCMTK `dcmencap` (pdf2dcm).
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The PDF or Document File to be encapsulated.
+                parameters:
+                  type: string
+                  description: |
+                    JSON payload containing specific patient, layout, and document identification configurations.
+                    Example:
+                    {
+                      "filetype": "pdf",
+                      "title": "Clinical PDF Report",
+                      "patient_name": "Doe^John",
+                      "patient_id": "89392",
+                      "generate_uids": true
+                    }
+      responses:
+        '200':
+          description: Successful Encapsulation
+          content:
+            application/dicom:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: Bad Request (Invalid Form or JSON Parameters)
+        '500':
+          description: Conversion Error
