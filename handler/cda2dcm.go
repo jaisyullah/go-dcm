@@ -8,19 +8,18 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"go-dcm/model"
 	"go-dcm/service"
 )
 
-// MaxPDFUploadSize is the maximum allowed PDF upload size (configurable via env).
-var MaxPDFUploadSize int64 = 100 << 20 // 100 MB default
+// MaxCDAUploadSize is the maximum allowed CDA upload size.
+var MaxCDAUploadSize int64 = 50 << 20 // 50 MB default
 
-// Pdf2DcmRequest represents the JSON parameters for PDF-to-DICOM conversion.
-// These fields map directly to pdf2dcm v3.6.9 CLI options.
-type Pdf2DcmRequest struct {
+// Cda2DcmRequest represents the JSON parameters for CDA-to-DICOM conversion.
+// Maps to DCMTK cda2dcm CLI options.
+type Cda2DcmRequest struct {
 	// Document title
 	Title          string `json:"title,omitempty"`            // --title
 	ConceptNameCSD string `json:"concept_name_csd,omitempty"` // --concept-name CSD
@@ -34,7 +33,7 @@ type Pdf2DcmRequest struct {
 	PatientSex       string `json:"patient_sex,omitempty"`       // --patient-sex (M, F, O)
 
 	// Study and series
-	GenerateUIDs *bool  `json:"generate_uids,omitempty"` // --generate (default true)
+	GenerateUIDs *bool  `json:"generate_uids,omitempty"` // --generate
 	StudyFrom    string `json:"study_from,omitempty"`    // --study-from
 	SeriesFrom   string `json:"series_from,omitempty"`   // --series-from
 
@@ -44,26 +43,22 @@ type Pdf2DcmRequest struct {
 	InstanceSet int  `json:"instance_set,omitempty"` // --instance-set
 
 	// Burned-in annotation
-	AnnotationNo  bool `json:"annotation_no,omitempty"`  // --annotation-no
-	AnnotationYes bool `json:"annotation_yes,omitempty"` // --annotation-yes
+	AnnotationNo bool `json:"annotation_no,omitempty"` // --annotation-no
 
-	// Additional DICOM keys (for Manufacturer, ManufacturerModelName, etc.)
+	// Additional DICOM keys
 	Keys []string `json:"keys,omitempty"` // --key
 }
 
-// ToArgs converts the request to pdf2dcm CLI arguments.
-func (req *Pdf2DcmRequest) ToArgs() []string {
+// ToArgs converts the request to cda2dcm CLI arguments.
+func (req *Cda2DcmRequest) ToArgs() []string {
 	var args []string
 
-	// Document title
 	if req.Title != "" {
 		args = append(args, "--title", req.Title)
 	}
 	if req.ConceptNameCSD != "" && req.ConceptNameCV != "" && req.ConceptNameCM != "" {
 		args = append(args, "--concept-name", req.ConceptNameCSD, req.ConceptNameCV, req.ConceptNameCM)
 	}
-
-	// Patient data
 	if req.PatientName != "" {
 		args = append(args, "--patient-name", req.PatientName)
 	}
@@ -76,8 +71,6 @@ func (req *Pdf2DcmRequest) ToArgs() []string {
 	if req.PatientSex != "" {
 		args = append(args, "--patient-sex", req.PatientSex)
 	}
-
-	// Study and series UIDs
 	if req.GenerateUIDs != nil && *req.GenerateUIDs {
 		args = append(args, "--generate")
 	}
@@ -87,8 +80,6 @@ func (req *Pdf2DcmRequest) ToArgs() []string {
 	if req.SeriesFrom != "" {
 		args = append(args, "--series-from", req.SeriesFrom)
 	}
-
-	// Instance number
 	if req.InstanceOne {
 		args = append(args, "--instance-one")
 	}
@@ -96,20 +87,15 @@ func (req *Pdf2DcmRequest) ToArgs() []string {
 		args = append(args, "--instance-inc")
 	}
 	if req.InstanceSet > 0 {
-		args = append(args, "--instance-set", strconv.Itoa(req.InstanceSet))
+		args = append(args, "--instance-set", fmt.Sprintf("%d", req.InstanceSet))
 	}
-
-	// Burned-in annotation
 	if req.AnnotationNo {
 		args = append(args, "--annotation-no")
-	} else if req.AnnotationYes {
-		args = append(args, "--annotation-yes")
 	}
 
-	// Inject mandatory DICOM tags if not provided
+	// Inject mandatory defaults
 	req.injectDefaults()
 
-	// Additional DICOM keys
 	for _, key := range req.Keys {
 		args = append(args, "--key", key)
 	}
@@ -117,30 +103,23 @@ func (req *Pdf2DcmRequest) ToArgs() []string {
 	return args
 }
 
-// injectDefaults adds mandatory DICOM tags if not already specified.
-func (req *Pdf2DcmRequest) injectDefaults() {
+func (req *Cda2DcmRequest) injectDefaults() {
 	today := time.Now().Format("20060102")
-
-	// StudyDate — defaults to today
 	if !service.HasKeyPrefix(req.Keys, "StudyDate") {
 		req.Keys = append(req.Keys, "StudyDate="+today)
 	}
-
-	// ContentDate — defaults to today
 	if !service.HasKeyPrefix(req.Keys, "ContentDate") {
 		req.Keys = append(req.Keys, "ContentDate="+today)
 	}
 }
 
-// HandlePdf2Dcm handles POST /api/v1/convert/pdf2dcm
-func HandlePdf2Dcm(w http.ResponseWriter, r *http.Request) {
-	// Parse multipart form
-	if err := r.ParseMultipartForm(MaxPDFUploadSize); err != nil {
+// HandleCda2Dcm handles POST /api/v1/convert/cda2dcm
+func HandleCda2Dcm(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(MaxCDAUploadSize); err != nil {
 		model.WriteError(w, http.StatusBadRequest, "INVALID_FORM", "Failed to parse multipart form", err.Error())
 		return
 	}
 
-	// Get the uploaded file
 	file, fileHeader, err := r.FormFile("file")
 	if err != nil {
 		model.WriteError(w, http.StatusBadRequest, "MISSING_FILE", "Missing 'file' field in form data", "")
@@ -148,15 +127,13 @@ func HandlePdf2Dcm(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// Validate file extension
-	if err := service.ValidateFileExtension(fileHeader.Filename, service.AllowedDocExtensions); err != nil {
-		model.WriteError(w, http.StatusBadRequest, "INVALID_FILE_TYPE", err.Error(), "Supported format: PDF")
+	if err := service.ValidateFileExtension(fileHeader.Filename, service.AllowedCDAExtensions); err != nil {
+		model.WriteError(w, http.StatusBadRequest, "INVALID_FILE_TYPE", err.Error(), "Supported formats: XML, CDA, HTML")
 		return
 	}
 
-	// Parse optional parameters JSON
 	paramsStr := r.FormValue("parameters")
-	var reqBody Pdf2DcmRequest
+	var reqBody Cda2DcmRequest
 	if paramsStr != "" {
 		if err := json.Unmarshal([]byte(paramsStr), &reqBody); err != nil {
 			model.WriteError(w, http.StatusBadRequest, "INVALID_PARAMS", "Invalid parameters JSON", err.Error())
@@ -164,14 +141,12 @@ func HandlePdf2Dcm(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Validate keys format
 	if err := service.ValidateKeys(reqBody.Keys); err != nil {
-		model.WriteError(w, http.StatusBadRequest, "INVALID_KEY_FORMAT", err.Error(), "Expected format: TagName=Value or gggg,eeee=Value")
+		model.WriteError(w, http.StatusBadRequest, "INVALID_KEY_FORMAT", err.Error(), "")
 		return
 	}
 
-	// Create temp directory
-	tempDir, err := os.MkdirTemp("", "pdf2dcm_*")
+	tempDir, err := os.MkdirTemp("", "cda2dcm_*")
 	if err != nil {
 		slog.Error("failed to create temp directory", "error", err)
 		model.WriteError(w, http.StatusInternalServerError, "TEMP_DIR_ERROR", "Failed to create temporary directory", "")
@@ -179,7 +154,6 @@ func HandlePdf2Dcm(w http.ResponseWriter, r *http.Request) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Save uploaded file
 	inputFilePath := filepath.Join(tempDir, service.SanitizeFilename(fileHeader.Filename))
 	out, err := os.Create(inputFilePath)
 	if err != nil {
@@ -195,24 +169,15 @@ func HandlePdf2Dcm(w http.ResponseWriter, r *http.Request) {
 	}
 	out.Close()
 
-	// Validate PDF magic bytes
-	if err := service.ValidateMIMEType(inputFilePath, []string{"application/pdf"}); err != nil {
-		model.WriteError(w, http.StatusBadRequest, "INVALID_PDF", "File does not appear to be a valid PDF", err.Error())
-		return
-	}
-
-	// Define output path
 	outputFilePath := filepath.Join(tempDir, "output.dcm")
 
-	// Execute pdf2dcm (NOT dcmencap — which doesn't exist in DCMTK 3.6.9+)
 	args := reqBody.ToArgs()
-	if err := service.RunDCMTK("pdf2dcm", inputFilePath, outputFilePath, args); err != nil {
-		model.WriteError(w, http.StatusInternalServerError, "CONVERSION_FAILED", "DICOM conversion failed", err.Error())
+	if err := service.RunDCMTK("cda2dcm", inputFilePath, outputFilePath, args); err != nil {
+		model.WriteError(w, http.StatusInternalServerError, "CONVERSION_FAILED", "CDA to DICOM conversion failed", err.Error())
 		return
 	}
 
-	// Determine output filename
-	outputFilename := resolveOutputFilename(reqBody.Keys, "document")
+	outputFilename := resolveOutputFilename(reqBody.Keys, "cda_document")
 
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, outputFilename))
 	w.Header().Set("Content-Type", "application/dicom")

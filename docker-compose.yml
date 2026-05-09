@@ -1,0 +1,47 @@
+services:
+  go-dcm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: go-dcm
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - MAX_IMAGE_UPLOAD_MB=100
+      - MAX_PDF_UPLOAD_MB=200
+      - MAX_CDA_UPLOAD_MB=100
+      - MAX_STL_UPLOAD_MB=200
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - dcm-net
+
+  # Orthanc DICOM server for integration testing
+  orthanc:
+    image: orthancteam/orthanc:24.12.4
+    container_name: orthanc
+    ports:
+      - "8042:8042"   # Web UI & REST API
+      - "4242:4242"   # DICOM port
+    environment:
+      - ORTHANC__DICOM_AET=ORTHANC
+      - ORTHANC__DICOM_PORT=4242
+      - ORTHANC__REGISTERED_USERS={"admin": "admin"}
+    volumes:
+      - orthanc-data:/var/lib/orthanc/db
+    restart: unless-stopped
+    networks:
+      - dcm-net
+
+networks:
+  dcm-net:
+    driver: bridge
+
+volumes:
+  orthanc-data:
