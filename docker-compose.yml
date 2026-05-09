@@ -12,6 +12,11 @@ services:
       - MAX_PDF_UPLOAD_MB=200
       - MAX_CDA_UPLOAD_MB=100
       - MAX_STL_UPLOAD_MB=200
+      # Orthanc connection — point to your own Orthanc server
+      - ORTHANC_URL=http://orthanc_ip
+      - ORTHANC_PORT=8042
+      - ORTHANC_USER=orthanc
+      - ORTHANC_PASS=orthanc
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]

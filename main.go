@@ -12,6 +12,7 @@ import (
 
 	"go-dcm/handler"
 	"go-dcm/router"
+	"go-dcm/service"
 )
 
 func main() {
@@ -24,6 +25,7 @@ func main() {
 	// Load configuration from environment
 	port := getEnv("PORT", "8080")
 	loadUploadLimits()
+	loadOrthancConfig()
 
 	// Setup router
 	r := router.SetupRouter()
@@ -100,5 +102,24 @@ func loadUploadLimits() {
 			handler.MaxSTLUploadSize = mb << 20
 			slog.Info("configured STL upload limit", "max_mb", mb)
 		}
+	}
+}
+
+// loadOrthancConfig loads Orthanc connection settings from environment variables.
+func loadOrthancConfig() {
+	cfg := service.LoadOrthancConfig()
+	handler.OrthancCfg = cfg
+
+	if cfg.IsConfigured() {
+		authStatus := "disabled"
+		if cfg.User != "" {
+			authStatus = "enabled (user: " + cfg.User + ")"
+		}
+		slog.Info("Orthanc configured",
+			"url", cfg.BaseURL(),
+			"auth", authStatus,
+		)
+	} else {
+		slog.Warn("Orthanc not configured — send-to-orthanc endpoint will be unavailable. Set ORTHANC_URL to enable.")
 	}
 }

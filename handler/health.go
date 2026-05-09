@@ -27,6 +27,17 @@ func HandleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Check Orthanc connectivity
+	if OrthancCfg.IsConfigured() {
+		if err := service.PingOrthanc(&OrthancCfg); err != nil {
+			deps["orthanc"] = "unreachable: " + err.Error()
+		} else {
+			deps["orthanc"] = "connected"
+		}
+	} else {
+		deps["orthanc"] = "not_configured"
+	}
+
 	deps["go_version"] = runtime.Version()
 
 	status := "healthy"

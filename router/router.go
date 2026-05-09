@@ -37,6 +37,9 @@ func SetupRouter() *chi.Mux {
 			r.Post("/cda2dcm", handler.HandleCda2Dcm)
 			r.Post("/stl2dcm", handler.HandleStl2Dcm)
 		})
+
+		// Convert & send directly to Orthanc
+		r.Post("/send-to-orthanc", handler.HandleSendToOrthanc)
 	})
 
 	return r
