@@ -375,7 +375,7 @@ This is the same payload format as Orthanc's `POST /studies/{id}/modify` API. Th
 
 | Modify Field | Type | Description |
 |---|---|---|
-| `Replace` | `map[string]string` | DICOM tags to set/replace (key = tag name, value = tag value) |
+| `Replace` | JSON object | DICOM tags to set/replace (key = tag name; value = string for simple tags, or nested JSON arrays/objects for sequences e.g. `ScheduledProcedureStepSequence`) |
 | `Remove` | `[]string` | DICOM tag names to remove |
 | `Keep` | `[]string` | DICOM tag names to preserve during modification |
 | `KeepSource` | `bool` | `false` = replace original study, `true` = keep original + create modified copy |

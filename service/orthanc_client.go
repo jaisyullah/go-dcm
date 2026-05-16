@@ -57,8 +57,10 @@ type OrthancUploadResponse struct {
 }
 
 // OrthancModifyRequest represents the payload for POST /studies/{id}/modify.
+// Replace values are any for Orthanc JSON compatibility: strings for simple tags,
+// arrays of objects for sequences (e.g. ScheduledProcedureStepSequence).
 type OrthancModifyRequest struct {
-	Replace     map[string]string `json:"Replace,omitempty"`
+	Replace     map[string]any    `json:"Replace,omitempty"`
 	Remove      []string          `json:"Remove,omitempty"`
 	Keep        []string          `json:"Keep,omitempty"`
 	KeepSource  bool              `json:"KeepSource"`
@@ -168,6 +170,7 @@ func ModifyStudy(config *OrthancConfig, studyID string, modifyReq *OrthancModify
 	slog.Info("modifying study tags in Orthanc",
 		"url", url,
 		"study_id", studyID,
+		"replace_tag_count", len(modifyReq.Replace),
 		"replace_tags", modifyReq.Replace,
 	)
 
