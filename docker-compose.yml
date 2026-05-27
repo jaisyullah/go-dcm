@@ -1,9 +1,9 @@
 services:
-  go-dcm:
+  dicom-converter-api:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: go-dcm
+    container_name: dicom-converter-api
     ports:
       - "8080:8080"
     environment:
@@ -13,10 +13,12 @@ services:
       - MAX_CDA_UPLOAD_MB=100
       - MAX_STL_UPLOAD_MB=200
       # Orthanc connection — point to your own Orthanc server
-      - ORTHANC_URL=http://orthanc_ip
+      - ORTHANC_URL=http://host.docker.internal
       - ORTHANC_PORT=8042
       - ORTHANC_USER=orthanc
       - ORTHANC_PASS=orthanc
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
@@ -29,7 +31,7 @@ services:
 
   # Orthanc DICOM server for integration testing
   orthanc:
-    image: orthancteam/orthanc:24.12.4
+    image: orthancteam/orthanc:26.4.2
     container_name: orthanc
     ports:
       - "8042:8042"   # Web UI & REST API
@@ -37,7 +39,7 @@ services:
     environment:
       - ORTHANC__DICOM_AET=ORTHANC
       - ORTHANC__DICOM_PORT=4242
-      - ORTHANC__REGISTERED_USERS={"admin": "admin"}
+      - ORTHANC__REGISTERED_USERS={"orthanc": "orthanc"}
     volumes:
       - orthanc-data:/var/lib/orthanc/db
     restart: unless-stopped
