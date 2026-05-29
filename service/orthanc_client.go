@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -88,8 +89,7 @@ func newOrthancRequest(method, url string, body io.Reader, config *OrthancConfig
 	return req, nil
 }
 
-// UploadInstance uploads a DICOM file to Orthanc via POST /instances.
-// Orthanc expects the raw DICOM binary as the request body.
+// UploadInstance uploads a DICOM file to Orthanc via POST /instances with automatic retry.
 func UploadInstance(config *OrthancConfig, dcmFilePath string) (*OrthancUploadResponse, error) {
 	if !config.IsConfigured() {
 		return nil, fmt.Errorf("orthanc is not configured (ORTHANC_URL is empty)")
@@ -102,50 +102,68 @@ func UploadInstance(config *OrthancConfig, dcmFilePath string) (*OrthancUploadRe
 	}
 
 	url := fmt.Sprintf("%s/instances", config.BaseURL())
-
-	req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(dcmData), config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create upload request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/dicom")
-
-	slog.Info("uploading DICOM instance to Orthanc", "url", url, "file_size", len(dcmData))
-
-	resp, err := orthancHTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to upload to Orthanc: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read Orthanc upload response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		slog.Error("Orthanc upload failed",
-			"status", resp.StatusCode,
-			"body", string(respBody),
-		)
-		return nil, fmt.Errorf("Orthanc upload failed with status %d: %s", resp.StatusCode, string(respBody))
-	}
-
 	var uploadResp OrthancUploadResponse
-	if err := json.Unmarshal(respBody, &uploadResp); err != nil {
-		return nil, fmt.Errorf("failed to parse Orthanc upload response: %w", err)
+	var lastErr error
+	maxRetries := 5
+	backoff := 1 * time.Second
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(dcmData), config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create upload request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/dicom")
+
+		slog.Info("uploading DICOM instance to Orthanc", "url", url, "file_size", len(dcmData), "attempt", attempt)
+
+		resp, err := orthancHTTPClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to upload to Orthanc: %w", err)
+			slog.Warn("Orthanc upload failed with network error, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("failed to read Orthanc upload response: %w", err)
+			slog.Warn("Failed to read Orthanc response body, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("Orthanc upload failed with status %d: %s", resp.StatusCode, string(respBody))
+			if resp.StatusCode >= 500 {
+				slog.Warn("Orthanc upload returned server error, retrying...", "status", resp.StatusCode, "attempt", attempt)
+				time.Sleep(backoff)
+				backoff *= 2
+				continue
+			}
+			// For 4xx errors, fail immediately
+			return nil, lastErr
+		}
+
+		if err := json.Unmarshal(respBody, &uploadResp); err != nil {
+			return nil, fmt.Errorf("failed to parse Orthanc upload response: %w", err)
+		}
+
+		slog.Info("DICOM instance uploaded to Orthanc",
+			"instance_id", uploadResp.ID,
+			"parent_study", uploadResp.ParentStudy,
+			"status", uploadResp.Status,
+		)
+		return &uploadResp, nil
 	}
 
-	slog.Info("DICOM instance uploaded to Orthanc",
-		"instance_id", uploadResp.ID,
-		"parent_study", uploadResp.ParentStudy,
-		"status", uploadResp.Status,
-	)
-
-	return &uploadResp, nil
+	return nil, fmt.Errorf("failed after %d upload attempts: %w", maxRetries, lastErr)
 }
 
 // ModifyStudy modifies DICOM tags on a study via POST /studies/{id}/modify.
-// Forces Synchronous=true for production reliability.
+// Implements automatic retries on transient errors and auto-aligns patient demographic mismatches.
 func ModifyStudy(config *OrthancConfig, studyID string, modifyReq *OrthancModifyRequest) (json.RawMessage, error) {
 	if !config.IsConfigured() {
 		return nil, fmt.Errorf("orthanc is not configured (ORTHANC_URL is empty)")
@@ -154,48 +172,110 @@ func ModifyStudy(config *OrthancConfig, studyID string, modifyReq *OrthancModify
 	// Force synchronous for reliable response
 	modifyReq.Synchronous = true
 
-	payload, err := json.Marshal(modifyReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal modify request: %w", err)
-	}
+	var lastErr error
+	maxRetries := 5
+	backoff := 1 * time.Second
+	aligned := false
 
-	url := fmt.Sprintf("%s/studies/%s/modify", config.BaseURL(), studyID)
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		payload, err := json.Marshal(modifyReq)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal modify request: %w", err)
+		}
 
-	req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(payload), config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create modify request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
+		url := fmt.Sprintf("%s/studies/%s/modify", config.BaseURL(), studyID)
 
-	slog.Info("modifying study tags in Orthanc",
-		"url", url,
-		"study_id", studyID,
-		"replace_tag_count", len(modifyReq.Replace),
-		"replace_tags", modifyReq.Replace,
-	)
+		req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(payload), config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create modify request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-	resp, err := orthancHTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send modify request to Orthanc: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read Orthanc modify response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		slog.Error("Orthanc modify failed",
-			"status", resp.StatusCode,
-			"body", string(respBody),
+		slog.Info("modifying study tags in Orthanc",
+			"url", url,
+			"study_id", studyID,
+			"attempt", attempt,
+			"replace_tag_count", len(modifyReq.Replace),
 		)
-		return nil, fmt.Errorf("Orthanc modify failed with status %d: %s", resp.StatusCode, string(respBody))
+
+		resp, err := orthancHTTPClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to send modify request to Orthanc: %w", err)
+			slog.Warn("Orthanc modify failed with network error, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("failed to read Orthanc modify response: %w", err)
+			slog.Warn("Failed to read Orthanc modify response body, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("Orthanc modify failed with status %d: %s", resp.StatusCode, string(respBody))
+			
+			// 1. Self-recovery: check for demographic mismatch (HTTP 400 Bad Request)
+			if resp.StatusCode == http.StatusBadRequest && !aligned &&
+				(strings.Contains(string(respBody), "Trying to change patient tags in a study") ||
+					strings.Contains(string(respBody), "All the 'Replace' tags should match")) {
+				
+				slog.Warn("Demographic mismatch detected. Attempting self-recovery by aligning with existing patient main DICOM tags in Orthanc...")
+				
+				patientID, ok := modifyReq.Replace["PatientID"].(string)
+				if ok && patientID != "" {
+					demographics, err := findExistingPatientDemographics(config, patientID)
+					if err == nil {
+						slog.Info("Self-recovery: successfully found existing patient demographics in Orthanc. Aligning replace tags...",
+							"patient_id", patientID,
+							"existing_name", demographics["PatientName"],
+							"existing_dob", demographics["PatientBirthDate"],
+							"existing_sex", demographics["PatientSex"],
+						)
+
+						// Align demographics exactly with existing patient in Orthanc
+						if demographics["PatientName"] != "" {
+							modifyReq.Replace["PatientName"] = demographics["PatientName"]
+						}
+						if demographics["PatientBirthDate"] != "" {
+							modifyReq.Replace["PatientBirthDate"] = demographics["PatientBirthDate"]
+						}
+						if demographics["PatientSex"] != "" {
+							modifyReq.Replace["PatientSex"] = demographics["PatientSex"]
+						}
+
+						aligned = true
+						// Reset retry counter to give the corrected request clean attempts
+						attempt = 0
+						continue
+					} else {
+						slog.Error("Self-recovery failed: could not fetch existing patient from Orthanc", "error", err)
+					}
+				}
+			}
+
+			// 2. Retry on server errors (status >= 500)
+			if resp.StatusCode >= 500 {
+				slog.Warn("Orthanc modify returned server error, retrying...", "status", resp.StatusCode, "attempt", attempt)
+				time.Sleep(backoff)
+				backoff *= 2
+				continue
+			}
+
+			// For all other client errors (4xx), fail immediately
+			return nil, lastErr
+		}
+
+		slog.Info("study tags modified successfully in Orthanc", "study_id", studyID)
+		return json.RawMessage(respBody), nil
 	}
 
-	slog.Info("study tags modified successfully in Orthanc", "study_id", studyID)
-
-	return json.RawMessage(respBody), nil
+	return nil, fmt.Errorf("failed after %d modify attempts: %w", maxRetries, lastErr)
 }
 
 // DeleteInstance removes an instance from Orthanc via DELETE /instances/{id}.
@@ -254,4 +334,68 @@ func PingOrthanc(config *OrthancConfig) error {
 	}
 
 	return nil
+}
+
+// PatientFindResult defines the fields we care about in Orthanc's POST /tools/find response.
+type PatientFindResult struct {
+	ID            string `json:"ID"`
+	MainDicomTags struct {
+		PatientBirthDate string `json:"PatientBirthDate"`
+		PatientID        string `json:"PatientID"`
+		PatientName      string `json:"PatientName"`
+		PatientSex       string `json:"PatientSex"`
+	} `json:"MainDicomTags"`
+}
+
+// findExistingPatientDemographics queries Orthanc's POST /tools/find to retrieve existing patient demographics.
+func findExistingPatientDemographics(config *OrthancConfig, patientID string) (map[string]string, error) {
+	url := fmt.Sprintf("%s/tools/find", config.BaseURL())
+	queryPayload := map[string]any{
+		"Level":  "Patient",
+		"Expand": true,
+		"Query": map[string]string{
+			"PatientID": patientID,
+		},
+	}
+	bodyBytes, err := json.Marshal(queryPayload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(bodyBytes), config)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := orthancHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("find patient failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var results []PatientFindResult
+	if err := json.Unmarshal(respBody, &results); err != nil {
+		return nil, err
+	}
+
+	if len(results) == 0 {
+		return nil, fmt.Errorf("patient not found in Orthanc")
+	}
+
+	demographics := map[string]string{
+		"PatientName":      results[0].MainDicomTags.PatientName,
+		"PatientBirthDate": results[0].MainDicomTags.PatientBirthDate,
+		"PatientSex":       results[0].MainDicomTags.PatientSex,
+	}
+	return demographics, nil
 }

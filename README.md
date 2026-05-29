@@ -44,6 +44,7 @@ A production-grade Go REST API for converting images (JPEG, PNG, BMP), PDFs, CDA
 | **DICOM Compliance** | Auto-injects mandatory tags (Modality, StudyDate, ContentDate) |
 | **Tag Modification** | Modify patient/study-level DICOM tags via Orthanc's REST API |
 | **Rollback on Failure** | Auto-deletes uploaded instance from Orthanc if tag modification fails |
+| **Self-Recovery & Retries** | Automatic backoff retry on transient storage errors + auto-alignment on demographic mismatches |
 | **Structured Logging** | JSON-formatted logs via `log/slog` |
 | **Health Checks** | `/health` with DCMTK + Orthanc connectivity status |
 | **Docker Ready** | Multi-stage Dockerfile with non-root user |
@@ -425,6 +426,24 @@ curl -X POST http://localhost:8080/api/v1/send-to-orthanc \
 - Uses **synchronous** modify — the API blocks until Orthanc completes the tag modification, so the response is always definitive (success or failure).
 - **Rollback on failure** — if the upload succeeds but tag modification fails, the uploaded instance is automatically deleted from Orthanc. No orphaned data.
 - `KeepSource: false` — the original study (with incorrect tags) is replaced. Set to `true` if you want to keep the original.
+
+---
+
+## Self-Recovery & Reliability
+
+To ensure zero data loss and absolute reliability in production hospital environments, `go-dcm` includes automated self-recovery mechanisms:
+
+### 1. Transient Error Self-Healing (Exponential Backoff Retries)
+* **What it solves**: Transient server write failures (like Orthanc filesystem locks, full-disk scenarios, or minor network latency glitches).
+* **How it works**: For both **DICOM uploads** (`POST /instances`) and **study modifications** (`POST /studies/{id}/modify`), the API automatically retries the operation up to **5 times** with exponential backoff delays (starting at `1s`, then `2s`, then `4s`, then `8s`, up to a total of **15 seconds** of patience) upon encountering status `>= 500` or TCP dial network errors.
+
+### 2. Patient Demographic Mismatch Auto-Alignment
+* **What it solves**: Orthanc rejects study modifications with `HTTP 400 Bad Request` if the target `PatientID` already exists in the database and has other studies but the new demographic tags (e.g. `PatientName`, `PatientBirthDate`, `PatientSex`) have spelling or formatting mismatches.
+* **How it works**:
+  1. If `/studies/{id}/modify` returns `400 Bad Request` with a demographic mismatch error, `go-dcm` intercepts the error.
+  2. It queries Orthanc's `/tools/find` endpoint to fetch the existing patient's main DICOM tags exactly as stored in Orthanc.
+  3. It auto-aligns the modify request payload's demographics (`PatientName`, `PatientBirthDate`, `PatientSex`) to match the existing patient's demographics character-for-character.
+  4. It automatically retries the modification with the aligned metadata, guaranteeing a successful mapping and database sync without manual intervention!
 
 ---
 
