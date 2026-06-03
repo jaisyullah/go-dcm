@@ -40,6 +40,7 @@ func SetupRouter() *chi.Mux {
 
 		// Convert & send directly to Orthanc
 		r.Post("/send-to-orthanc", handler.HandleSendToOrthanc)
+		r.Post("/send-to-orthanc-from-urls", handler.HandleSendToOrthancFromURLs)
 	})
 
 	return r
