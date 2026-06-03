@@ -225,36 +225,51 @@ func ModifyStudy(config *OrthancConfig, studyID string, modifyReq *OrthancModify
 				(strings.Contains(string(respBody), "Trying to change patient tags in a study") ||
 					strings.Contains(string(respBody), "All the 'Replace' tags should match")) {
 				
-				slog.Warn("Demographic mismatch detected. Attempting self-recovery by aligning with existing patient main DICOM tags in Orthanc...")
+				slog.Warn("Demographic mismatch detected. Attempting self-recovery by updating patient demographics in Orthanc (Option B)...")
 				
-				patientID, ok := modifyReq.Replace["PatientID"].(string)
-				if ok && patientID != "" {
-					demographics, err := findExistingPatientDemographics(config, patientID)
+				patientID, okPID := modifyReq.Replace["PatientID"].(string)
+				patientName, _ := modifyReq.Replace["PatientName"].(string)
+				patientBirthDate, _ := modifyReq.Replace["PatientBirthDate"].(string)
+				patientSex, _ := modifyReq.Replace["PatientSex"].(string)
+				studyDate, _ := modifyReq.Replace["StudyDate"].(string)
+				modality, _ := modifyReq.Replace["Modality"].(string)
+				
+				if okPID && patientID != "" {
+					patientInternalID, err := findPatientInternalID(config, patientID)
 					if err == nil {
-						slog.Info("Self-recovery: successfully found existing patient demographics in Orthanc. Aligning replace tags...",
+						slog.Info("Self-recovery: Found patient internal ID in Orthanc. Overwriting demographics...",
 							"patient_id", patientID,
-							"existing_name", demographics["PatientName"],
-							"existing_dob", demographics["PatientBirthDate"],
-							"existing_sex", demographics["PatientSex"],
+							"internal_id", patientInternalID,
+							"name", patientName,
+							"dob", patientBirthDate,
+							"sex", patientSex,
 						)
-
-						// Align demographics exactly with existing patient in Orthanc
-						if demographics["PatientName"] != "" {
-							modifyReq.Replace["PatientName"] = demographics["PatientName"]
+						
+						err = modifyPatient(config, patientInternalID, patientName, patientBirthDate, patientSex)
+						if err == nil {
+							slog.Info("Self-recovery: Patient demographics successfully updated on Orthanc.")
+							
+							// Wait a short moment for indexing
+							time.Sleep(1 * time.Second)
+							
+							// Re-resolve the Study ID using PatientID, StudyDate, and Modality
+							newStudyID, err := findStudyIDByCriteria(config, patientID, studyDate, modality)
+							if err == nil {
+								slog.Info("Self-recovery: Successfully re-resolved new Study ID after patient update", "new_study_id", newStudyID)
+								studyID = newStudyID
+								aligned = true
+								
+								// Reset retry counter to give the corrected request clean attempts
+								attempt = 0
+								continue
+							} else {
+								slog.Error("Self-recovery failed: could not re-resolve Study ID after patient update", "error", err)
+							}
+						} else {
+							slog.Error("Self-recovery failed: could not modify patient on Orthanc", "error", err)
 						}
-						if demographics["PatientBirthDate"] != "" {
-							modifyReq.Replace["PatientBirthDate"] = demographics["PatientBirthDate"]
-						}
-						if demographics["PatientSex"] != "" {
-							modifyReq.Replace["PatientSex"] = demographics["PatientSex"]
-						}
-
-						aligned = true
-						// Reset retry counter to give the corrected request clean attempts
-						attempt = 0
-						continue
 					} else {
-						slog.Error("Self-recovery failed: could not fetch existing patient from Orthanc", "error", err)
+						slog.Error("Self-recovery failed: patient not found in Orthanc", "patient_id", patientID, "error", err)
 					}
 				}
 			}
@@ -398,4 +413,128 @@ func findExistingPatientDemographics(config *OrthancConfig, patientID string) (m
 		"PatientSex":       results[0].MainDicomTags.PatientSex,
 	}
 	return demographics, nil
+}
+
+// findPatientInternalID queries Orthanc's POST /tools/find to retrieve the patient's internal Orthanc resource ID.
+func findPatientInternalID(config *OrthancConfig, patientID string) (string, error) {
+	url := fmt.Sprintf("%s/tools/find", config.BaseURL())
+	queryPayload := map[string]any{
+		"Level":  "Patient",
+		"Expand": true,
+		"Query": map[string]string{
+			"PatientID": patientID,
+		},
+	}
+	bodyBytes, err := json.Marshal(queryPayload)
+	if err != nil {
+		return "", err
+	}
+	req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(bodyBytes), config)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := orthancHTTPClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("find patient internal ID failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+	var results []PatientFindResult
+	if err := json.Unmarshal(respBody, &results); err != nil {
+		return "", err
+	}
+	if len(results) == 0 {
+		return "", fmt.Errorf("patient not found in Orthanc")
+	}
+	return results[0].ID, nil
+}
+
+// modifyPatient updates patient-level demographics in Orthanc.
+func modifyPatient(config *OrthancConfig, patientInternalID string, name, birthDate, sex string) error {
+	url := fmt.Sprintf("%s/patients/%s/modify", config.BaseURL(), patientInternalID)
+	replace := map[string]string{}
+	if name != "" {
+		replace["PatientName"] = name
+	}
+	if birthDate != "" {
+		replace["PatientBirthDate"] = birthDate
+	}
+	if sex != "" {
+		replace["PatientSex"] = sex
+	}
+	payload := map[string]any{
+		"Replace":    replace,
+		"KeepSource": false,
+		"Force":      true,
+	}
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(bodyBytes), config)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := orthancHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("patient modify failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// findStudyIDByCriteria queries Orthanc's POST /tools/find to retrieve a Study ID matching PatientID, StudyDate, and Modality.
+func findStudyIDByCriteria(config *OrthancConfig, patientID, studyDate, modality string) (string, error) {
+	url := fmt.Sprintf("%s/tools/find", config.BaseURL())
+	query := map[string]string{
+		"PatientID": patientID,
+	}
+	if studyDate != "" {
+		query["StudyDate"] = studyDate
+	}
+	if modality != "" {
+		query["ModalitiesInStudy"] = modality
+	}
+	queryPayload := map[string]any{
+		"Level":  "Study",
+		"Expand": true,
+		"Query":  query,
+	}
+	bodyBytes, err := json.Marshal(queryPayload)
+	if err != nil {
+		return "", err
+	}
+	req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(bodyBytes), config)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := orthancHTTPClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("find study by criteria failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+	var results []struct {
+		ID string `json:"ID"`
+	}
+	if err := json.Unmarshal(respBody, &results); err != nil {
+		return "", err
+	}
+	if len(results) == 0 {
+		return "", fmt.Errorf("study not found by criteria")
+	}
+	return results[0].ID, nil
 }

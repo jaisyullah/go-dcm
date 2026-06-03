@@ -44,6 +44,9 @@ func SetupRouter() *chi.Mux {
 		// Convert & send directly to Orthanc
 		r.Post("/send-to-orthanc", handler.HandleSendToOrthanc)
 		r.Post("/send-to-orthanc-from-urls", handler.HandleSendToOrthancFromURLs)
+
+		// Proxy modify requests through gateway
+		r.Post("/studies/{id}/modify", handler.HandleModifyStudy)
 	})
 
 	return r
