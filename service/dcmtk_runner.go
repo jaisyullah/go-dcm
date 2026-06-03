@@ -12,61 +12,46 @@ import (
 // DefaultTimeout is the default command execution timeout.
 const DefaultTimeout = 60 * time.Second
 
-// RunDCMTK executes a DCMTK command line utility with timeout and output capture.
-//
-// tool: name of the executable (e.g. "img2dcm", "pdf2dcm", "cda2dcm", "stl2dcm")
-// inputFile: path to input file (e.g., uploaded jpg or pdf)
-// outputFile: path to resulting dicom file
-// extraArgs: additional arguments parsed from request
-func RunDCMTK(tool string, inputFile string, outputFile string, extraArgs []string) error {
-	return RunDCMTKWithTimeout(tool, inputFile, outputFile, extraArgs, DefaultTimeout)
-}
-
-// RunDCMTKWithTimeout executes a DCMTK command with a specified timeout.
-func RunDCMTKWithTimeout(tool string, inputFile string, outputFile string, extraArgs []string, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	// Construct the command: tool [options] inputFile outputFile
+// RunDCMTK executes a DCMTK command line utility with context propagation.
+// Note: It now accepts the request/job context!
+func RunDCMTK(ctx context.Context, tool string, inputFile string, outputFile string, extraArgs []string) error {
+	// Use the provided context. If the job times out or is cancelled,
+	// Go automatically sends SIGKILL to the OS process.
 	var cmdArgs []string
 	cmdArgs = append(cmdArgs, extraArgs...)
 	cmdArgs = append(cmdArgs, inputFile, outputFile)
 
 	cmd := exec.CommandContext(ctx, tool, cmdArgs...)
 
-	// Capture output for structured logging and error reporting
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	slog.Info("executing DCMTK command",
+	slog.InfoContext(ctx, "executing DCMTK command",
 		"tool", tool,
 		"input", inputFile,
-		"output", outputFile,
-		"args", extraArgs,
 	)
 
 	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			slog.Error("DCMTK command timed out",
+		// Check if cancellation caused the error
+		if ctx.Err() != nil {
+			slog.ErrorContext(ctx, "DCMTK command cancelled or timed out",
 				"tool", tool,
-				"timeout", timeout.String(),
+				"reason", ctx.Err().Error(),
 			)
-			return fmt.Errorf("%s timed out after %s", tool, timeout)
+			return fmt.Errorf("%s execution cancelled: %w", tool, ctx.Err())
 		}
 
-		slog.Error("DCMTK command failed",
+		slog.ErrorContext(ctx, "DCMTK command failed",
 			"tool", tool,
 			"error", err.Error(),
 			"stderr", stderr.String(),
-			"stdout", stdout.String(),
 		)
 		return fmt.Errorf("failed to run %s: %w — stderr: %s", tool, err, stderr.String())
 	}
 
-	slog.Info("DCMTK command completed successfully",
+	slog.InfoContext(ctx, "DCMTK command completed successfully",
 		"tool", tool,
-		"output", outputFile,
 	)
 
 	return nil

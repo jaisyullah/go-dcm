@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,21 +18,16 @@ import (
 // OrthancCfg is the global Orthanc configuration, loaded at startup.
 var OrthancCfg service.OrthancConfig
 
-// SendToOrthancRequest represents the parsed form data for the send-to-orthanc endpoint.
-type SendToOrthancRequest struct {
-	FileType      string                     // "img", "pdf", "cda", "stl"
-	ImgParams     *Img2DcmRequest            // populated when FileType == "img"
-	PdfParams     *Pdf2DcmRequest            // populated when FileType == "pdf"
-	CdaParams     *Cda2DcmRequest            // populated when FileType == "cda"
-	StlParams     *Stl2DcmRequest            // populated when FileType == "stl"
-	OrthancModify *service.OrthancModifyRequest
+// SendToOrthancResponse is the JSON response returned to the caller for async status.
+type SendToOrthancResponse struct {
+	Status string `json:"status"`
+	JobID  string `json:"job_id"`
 }
 
-// SendToOrthancResponse is the JSON response returned to the caller.
-type SendToOrthancResponse struct {
-	Status string                        `json:"status"`
+// SendToOrthancResult is the payload stored in the job result field on success.
+type SendToOrthancResult struct {
 	Upload *service.OrthancUploadResponse `json:"upload"`
-	Modify json.RawMessage               `json:"modify"`
+	Modify json.RawMessage                `json:"modify"`
 }
 
 // supportedFileTypes lists the valid filetype parameter values.
@@ -43,12 +39,7 @@ var supportedFileTypes = map[string]bool{
 }
 
 // HandleSendToOrthanc handles POST /api/v1/send-to-orthanc
-//
-// Workflow:
-//  1. Convert uploaded file to DICOM using the appropriate DCMTK tool
-//  2. Upload the DICOM to Orthanc (POST /instances)
-//  3. Modify study tags (POST /studies/{id}/modify)
-//  4. On modify failure, rollback by deleting the uploaded instance
+// Now refactored to be ASYNCHRONOUS.
 func HandleSendToOrthanc(w http.ResponseWriter, r *http.Request) {
 	// Verify Orthanc is configured
 	if !OrthancCfg.IsConfigured() {
@@ -76,14 +67,9 @@ func HandleSendToOrthanc(w http.ResponseWriter, r *http.Request) {
 
 	// Validate filetype parameter
 	fileType := strings.TrimSpace(strings.ToLower(r.FormValue("filetype")))
-	if fileType == "" {
-		model.WriteError(w, http.StatusBadRequest, "MISSING_FILETYPE",
-			"Missing 'filetype' parameter. Must be one of: img, pdf, cda, stl", "")
-		return
-	}
-	if !supportedFileTypes[fileType] {
+	if fileType == "" || !supportedFileTypes[fileType] {
 		model.WriteError(w, http.StatusBadRequest, "INVALID_FILETYPE",
-			"Invalid 'filetype' parameter. Must be one of: img, pdf, cda, stl", "got: "+fileType)
+			"Invalid 'filetype' parameter. Must be one of: img, pdf, cda, stl", "")
 		return
 	}
 
@@ -99,7 +85,7 @@ func HandleSendToOrthanc(w http.ResponseWriter, r *http.Request) {
 	modifyStr := r.FormValue("orthanc_modify")
 	if modifyStr == "" {
 		model.WriteError(w, http.StatusBadRequest, "MISSING_ORTHANC_MODIFY",
-			"Missing 'orthanc_modify' parameter with Orthanc modify payload", "")
+			"Missing 'orthanc_modify' parameter", "")
 		return
 	}
 	var modifyReq service.OrthancModifyRequest
@@ -112,98 +98,94 @@ func HandleSendToOrthanc(w http.ResponseWriter, r *http.Request) {
 	// Parse optional conversion parameters
 	paramsStr := r.FormValue("parameters")
 
-	// Create temp directory for the conversion
+	// 1. Prepare temp storage immediately (while we have the file handle)
 	tempDir, err := os.MkdirTemp("", "send_to_orthanc_*")
 	if err != nil {
 		slog.Error("failed to create temp directory", "error", err)
-		model.WriteError(w, http.StatusInternalServerError, "TEMP_DIR_ERROR",
-			"Failed to create temporary directory", "")
+		model.WriteError(w, http.StatusInternalServerError, "TEMP_DIR_ERROR", "Failed to create temporary directory", "")
 		return
 	}
-	defer os.RemoveAll(tempDir)
 
-	// Save uploaded file
 	inputFilePath := filepath.Join(tempDir, service.SanitizeFilename(fileHeader.Filename))
 	out, err := os.Create(inputFilePath)
 	if err != nil {
+		os.RemoveAll(tempDir)
 		slog.Error("failed to create temp file", "error", err)
-		model.WriteError(w, http.StatusInternalServerError, "FILE_SAVE_ERROR",
-			"Failed to save uploaded file", "")
+		model.WriteError(w, http.StatusInternalServerError, "FILE_SAVE_ERROR", "Failed to save uploaded file", "")
 		return
 	}
 	if _, err := io.Copy(out, file); err != nil {
 		out.Close()
+		os.RemoveAll(tempDir)
 		slog.Error("failed to write uploaded file", "error", err)
-		model.WriteError(w, http.StatusInternalServerError, "FILE_WRITE_ERROR",
-			"Failed to write uploaded file", "")
+		model.WriteError(w, http.StatusInternalServerError, "FILE_WRITE_ERROR", "Failed to write uploaded file", "")
 		return
 	}
 	out.Close()
 
-	outputFilePath := filepath.Join(tempDir, "output.dcm")
+	// 2. Create Background Job
+	jobID := service.CreateJob()
 
-	// ── Step 1: Convert to DICOM ────────────────────────────────────────
-	if err := convertToDICOM(fileType, inputFilePath, outputFilePath, tempDir, fileHeader.Filename, paramsStr); err != nil {
-		model.WriteError(w, http.StatusInternalServerError, "CONVERSION_FAILED",
-			"DICOM conversion failed", err.Error())
-		return
-	}
+	// 3. Enqueue Task
+	service.EnqueueTask(service.Task{
+		JobID: jobID,
+		ExecuteFunc: func(ctx context.Context) (any, error) {
+			// Cleanup files when the job finishes (even if it fails)
+			defer os.RemoveAll(tempDir)
 
-	// ── Step 2: Upload to Orthanc ───────────────────────────────────────
-	uploadResp, err := service.UploadInstance(&OrthancCfg, outputFilePath)
-	if err != nil {
-		model.WriteError(w, http.StatusBadGateway, "ORTHANC_UPLOAD_FAILED",
-			"Failed to upload DICOM to Orthanc", err.Error())
-		return
-	}
+			outputFilePath := filepath.Join(tempDir, "output.dcm")
 
-	// ── Step 3: Modify study tags ───────────────────────────────────────
-	modifyResp, err := service.ModifyStudy(&OrthancCfg, uploadResp.ParentStudy, &modifyReq)
-	if err != nil {
-		slog.Error("modify failed, rolling back upload",
-			"instance_id", uploadResp.ID,
-			"study_id", uploadResp.ParentStudy,
-			"error", err,
-		)
+			// Step 1: Convert to DICOM
+			if err := convertToDICOM(ctx, fileType, inputFilePath, outputFilePath, tempDir, fileHeader.Filename, paramsStr); err != nil {
+				return nil, fmt.Errorf("conversion failed: %w", err)
+			}
 
-		// Rollback: delete the uploaded instance
-		if delErr := service.DeleteInstance(&OrthancCfg, uploadResp.ID); delErr != nil {
-			slog.Error("rollback failed: could not delete instance",
-				"instance_id", uploadResp.ID,
-				"error", delErr,
-			)
-		}
+			// Step 2: Upload to Orthanc
+			uploadResp, err := service.UploadInstance(&OrthancCfg, outputFilePath)
+			if err != nil {
+				return nil, fmt.Errorf("orthanc upload failed: %w", err)
+			}
 
-		model.WriteError(w, http.StatusBadGateway, "ORTHANC_MODIFY_FAILED",
-			"Failed to modify study tags in Orthanc (upload was rolled back)", err.Error())
-		return
-	}
+			// Step 3: Modify study tags
+			modifyResp, err := service.ModifyStudy(&OrthancCfg, uploadResp.ParentStudy, &modifyReq)
+			if err != nil {
+				slog.Error("modify failed, rolling back upload", "job_id", jobID, "instance_id", uploadResp.ID, "error", err)
+				_ = service.DeleteInstance(&OrthancCfg, uploadResp.ID)
+				return nil, fmt.Errorf("orthanc modify failed: %w", err)
+			}
 
-	// ── Step 4: Return combined response ────────────────────────────────
-	model.WriteJSON(w, http.StatusOK, SendToOrthancResponse{
+			// Success! Return the combined result
+			return SendToOrthancResult{
+				Upload: uploadResp,
+				Modify: modifyResp,
+			}, nil
+		},
+	})
+
+	// 4. Respond with 202 Accepted and JobID
+	model.WriteJSON(w, http.StatusAccepted, SendToOrthancResponse{
 		Status: "success",
-		Upload: uploadResp,
-		Modify: modifyResp,
+		JobID:  jobID,
 	})
 }
 
 // convertToDICOM runs the appropriate DCMTK tool based on filetype.
-func convertToDICOM(fileType, inputFilePath, outputFilePath, tempDir, originalFilename, paramsStr string) error {
+func convertToDICOM(ctx context.Context, fileType, inputFilePath, outputFilePath, tempDir, originalFilename, paramsStr string) error {
 	switch fileType {
 	case "img":
-		return convertImg(inputFilePath, outputFilePath, tempDir, originalFilename, paramsStr)
+		return convertImg(ctx, inputFilePath, outputFilePath, tempDir, originalFilename, paramsStr)
 	case "pdf":
-		return convertPdf(inputFilePath, outputFilePath, paramsStr)
+		return convertPdf(ctx, inputFilePath, outputFilePath, paramsStr)
 	case "cda":
-		return convertCda(inputFilePath, outputFilePath, paramsStr)
+		return convertCda(ctx, inputFilePath, outputFilePath, paramsStr)
 	case "stl":
-		return convertStl(inputFilePath, outputFilePath, paramsStr)
+		return convertStl(ctx, inputFilePath, outputFilePath, paramsStr)
 	default:
 		return fmt.Errorf("unsupported filetype: %s", fileType)
 	}
 }
 
-func convertImg(inputFilePath, outputFilePath, tempDir, originalFilename, paramsStr string) error {
+func convertImg(ctx context.Context, inputFilePath, outputFilePath, tempDir, originalFilename, paramsStr string) error {
 	var reqBody Img2DcmRequest
 	if paramsStr != "" {
 		if err := json.Unmarshal([]byte(paramsStr), &reqBody); err != nil {
@@ -215,14 +197,11 @@ func convertImg(inputFilePath, outputFilePath, tempDir, originalFilename, params
 		return fmt.Errorf("invalid key format: %w", err)
 	}
 
-	// Validate file extension
 	if err := service.ValidateFileExtension(originalFilename, service.AllowedImageExtensions); err != nil {
 		return fmt.Errorf("invalid image file type: %w", err)
 	}
 
-	// PNG → BMP conversion
 	if service.IsPNG(originalFilename) {
-		slog.Info("converting PNG to BMP for DCMTK compatibility", "file", originalFilename)
 		bmpPath, err := service.ConvertPNGtoBMP(inputFilePath, tempDir)
 		if err != nil {
 			return fmt.Errorf("PNG to BMP conversion failed: %w", err)
@@ -231,59 +210,47 @@ func convertImg(inputFilePath, outputFilePath, tempDir, originalFilename, params
 		reqBody.InputFormat = "BMP"
 	}
 
-	args := reqBody.ToArgs()
-	return service.RunDCMTK("img2dcm", inputFilePath, outputFilePath, args)
+	return service.RunDCMTK(ctx, "img2dcm", inputFilePath, outputFilePath, reqBody.ToArgs())
 }
 
-func convertPdf(inputFilePath, outputFilePath, paramsStr string) error {
+func convertPdf(ctx context.Context, inputFilePath, outputFilePath, paramsStr string) error {
 	var reqBody Pdf2DcmRequest
 	if paramsStr != "" {
 		if err := json.Unmarshal([]byte(paramsStr), &reqBody); err != nil {
 			return fmt.Errorf("invalid pdf parameters JSON: %w", err)
 		}
 	}
-
 	if err := service.ValidateKeys(reqBody.Keys); err != nil {
 		return fmt.Errorf("invalid key format: %w", err)
 	}
-
-	// Validate MIME type
 	if err := service.ValidateMIMEType(inputFilePath, []string{"application/pdf"}); err != nil {
 		return fmt.Errorf("invalid PDF file: %w", err)
 	}
-
-	args := reqBody.ToArgs()
-	return service.RunDCMTK("pdf2dcm", inputFilePath, outputFilePath, args)
+	return service.RunDCMTK(ctx, "pdf2dcm", inputFilePath, outputFilePath, reqBody.ToArgs())
 }
 
-func convertCda(inputFilePath, outputFilePath, paramsStr string) error {
+func convertCda(ctx context.Context, inputFilePath, outputFilePath, paramsStr string) error {
 	var reqBody Cda2DcmRequest
 	if paramsStr != "" {
 		if err := json.Unmarshal([]byte(paramsStr), &reqBody); err != nil {
 			return fmt.Errorf("invalid cda parameters JSON: %w", err)
 		}
 	}
-
 	if err := service.ValidateKeys(reqBody.Keys); err != nil {
 		return fmt.Errorf("invalid key format: %w", err)
 	}
-
-	args := reqBody.ToArgs()
-	return service.RunDCMTK("cda2dcm", inputFilePath, outputFilePath, args)
+	return service.RunDCMTK(ctx, "cda2dcm", inputFilePath, outputFilePath, reqBody.ToArgs())
 }
 
-func convertStl(inputFilePath, outputFilePath, paramsStr string) error {
+func convertStl(ctx context.Context, inputFilePath, outputFilePath, paramsStr string) error {
 	var reqBody Stl2DcmRequest
 	if paramsStr != "" {
 		if err := json.Unmarshal([]byte(paramsStr), &reqBody); err != nil {
 			return fmt.Errorf("invalid stl parameters JSON: %w", err)
 		}
 	}
-
 	if err := service.ValidateKeys(reqBody.Keys); err != nil {
 		return fmt.Errorf("invalid key format: %w", err)
 	}
-
-	args := reqBody.ToArgs()
-	return service.RunDCMTK("stl2dcm", inputFilePath, outputFilePath, args)
+	return service.RunDCMTK(ctx, "stl2dcm", inputFilePath, outputFilePath, reqBody.ToArgs())
 }

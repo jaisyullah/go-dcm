@@ -239,7 +239,7 @@ func HandleImg2Dcm(w http.ResponseWriter, r *http.Request) {
 
 	// Execute img2dcm
 	args := reqBody.ToArgs()
-	if err := service.RunDCMTK("img2dcm", inputFilePath, outputFilePath, args); err != nil {
+	if err := service.RunDCMTK(r.Context(), "img2dcm", inputFilePath, outputFilePath, args); err != nil {
 		model.WriteError(w, http.StatusInternalServerError, "CONVERSION_FAILED", "DICOM conversion failed", err.Error())
 		return
 	}

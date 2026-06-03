@@ -170,12 +170,12 @@ func HandleCda2Dcm(w http.ResponseWriter, r *http.Request) {
 	out.Close()
 
 	outputFilePath := filepath.Join(tempDir, "output.dcm")
-
-	args := reqBody.ToArgs()
-	if err := service.RunDCMTK("cda2dcm", inputFilePath, outputFilePath, args); err != nil {
-		model.WriteError(w, http.StatusInternalServerError, "CONVERSION_FAILED", "CDA to DICOM conversion failed", err.Error())
-		return
-	}
+// Execute cda2dcm
+args := reqBody.ToArgs()
+if err := service.RunDCMTK(r.Context(), "cda2dcm", inputFilePath, outputFilePath, args); err != nil {
+	model.WriteError(w, http.StatusInternalServerError, "CONVERSION_FAILED", "DICOM conversion failed", err.Error())
+	return
+}
 
 	outputFilename := resolveOutputFilename(reqBody.Keys, "cda_document")
 

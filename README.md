@@ -21,9 +21,11 @@ A production-grade Go REST API for converting images (JPEG, PNG, BMP), PDFs, CDA
   - [Convert PDF to DICOM](#convert-pdf-to-dicom)
   - [Convert CDA to DICOM](#convert-cda-to-dicom)
   - [Convert STL to DICOM](#convert-stl-to-dicom)
-  - [Convert & Send to Orthanc](#convert--send-to-orthanc)
+  - [Convert & Send to Orthanc (Async)](#convert--send-to-orthanc-async)
+  - [Poll Job Status](#poll-job-status)
   - [Error Responses](#error-responses)
 - [DICOM Compliance](#dicom-compliance)
+- [Self-Recovery & Reliability](#self-recovery--reliability)
 - [Testing](#testing)
 - [Project Structure](#project-structure)
 - [License](#license)
@@ -39,7 +41,8 @@ A production-grade Go REST API for converting images (JPEG, PNG, BMP), PDFs, CDA
 | **PDF → DICOM** | Encapsulated PDF Storage DICOM objects |
 | **CDA → DICOM** | Encapsulated CDA XML documents |
 | **STL → DICOM** | Encapsulated 3D STL models |
-| **Send to Orthanc** | Convert & push to Orthanc with tag modification in a single API call |
+| **Send to Orthanc** | **Asynchronous** conversion & push to Orthanc with tag modification |
+| **Async Job Queue** | Bounded concurrency via worker pool (sized to CPU cores) to prevent OOM and timeouts |
 | **PNG Auto-Conversion** | PNG → lossless BMP before DICOM conversion (zero quality loss) |
 | **DICOM Compliance** | Auto-injects mandatory tags (Modality, StudyDate, ContentDate) |
 | **Tag Modification** | Modify patient/study-level DICOM tags via Orthanc's REST API |
@@ -58,24 +61,24 @@ A production-grade Go REST API for converting images (JPEG, PNG, BMP), PDFs, CDA
                                 │              go-dcm API                 │
                                 │                                         │
   ┌──────────┐   POST           │  ┌──────────┐    ┌──────────────────┐   │     ┌──────────┐
-  │  Client   │ ──────────────► │  │ Handlers │───►│ DCMTK (img2dcm, │   │     │          │
-  │ (curl,    │   multipart     │  │          │    │ pdf2dcm, cda2dcm,│   │     │  Orthanc │
-  │  app,     │   form-data     │  │          │    │ stl2dcm)         │   │     │   PACS   │
-  │  SIMRS)   │ ◄────────────── │  │          │    └──────────────────┘   │────►│          │
-  │           │   .dcm / JSON   │  │          │                           │     │          │
-  └──────────┘                  │  └──────────┘                           │     └──────────┘
-                                │         │                               │       ▲    │
-                                │         │  /send-to-orthanc             │       │    │
-                                │         └───────────────────────────────│───────┘    │
-                                │              upload + modify            │   response │
+  │  Client   │ ──────────────► │  │ Handlers │───►│  Worker Pool     │   │     │          │
+  │ (curl,    │   multipart     │  │ (Async)  │    │ (Bounded Concur.)│───┼────►│  Orthanc │
+  │  app,     │   form-data     │  │          │    └──────────────────┘   │     │   PACS   │
+  │  SIMRS)   │ ◄────────────── │  │          │             │             │     │          │
+  └──────────┘   202 Accepted   │  └──────────┘             ▼             │     └──────────┘
+       │          (job_id)      │         │        ┌──────────────────┐   │       ▲    │
+       │                        │         │        │ DCMTK (img2dcm,  │   │       │    │
+       │      GET /jobs/{id}    │         └───────►│ pdf2dcm, etc.)   │   │       │    │
+       └────────────────────────┼────────────────► └──────────────────┘   │───────┘    │
+              (Polling)         │              upload + modify            │   response │
                                 │                                         │◄───────────┘
                                 └─────────────────────────────────────────┘
 ```
 
 **Two modes of operation:**
 
-1. **Convert only** (`/api/v1/convert/*`) — Returns the `.dcm` file binary. Client handles storage.
-2. **Convert & send** (`/api/v1/send-to-orthanc`) — Converts, uploads to Orthanc, modifies tags, returns JSON result. Ideal for SIMRS/HIS integration.
+1. **Convert only** (`/api/v1/convert/*`) — **Synchronous**. Returns the `.dcm` file binary. Client handles storage.
+2. **Convert & send** (`/api/v1/send-to-orthanc`) — **Asynchronous**. Returns a `job_id` immediately. A background worker handles the heavy lifting. Ideal for SIMRS/HIS integration to prevent UI timeouts.
 
 ---
 
@@ -331,9 +334,9 @@ Content-Type: multipart/form-data
 
 ---
 
-### Convert & Send to Orthanc
+### Convert & Send to Orthanc (Async)
 
-> **This is the recommended endpoint for SIMRS/HIS integration.** It handles conversion, upload, and tag correction in a single call — ensuring DICOM tags are always correct in Orthanc.
+> **This is the recommended endpoint for SIMRS/HIS integration.** It handles conversion, upload, and tag correction in the background — ensuring the UI remains responsive and DICOM tags are eventually synced in Orthanc.
 
 ```
 POST /api/v1/send-to-orthanc
@@ -350,7 +353,52 @@ Content-Type: multipart/form-data
 | `parameters` | text/json | ❌ | Conversion parameters (same as the matching `/convert/*` endpoint) |
 | `orthanc_modify` | text/json | ✅ | Orthanc study modify payload (see below) |
 
-**`orthanc_modify` Payload:**
+**Success Response (202 Accepted):**
+```json
+{
+  "status": "success",
+  "job_id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+**Workflow:**
+1. API returns `202 Accepted` immediately with a `job_id`.
+2. The heavy work (conversion + upload + modify) starts in a background worker.
+3. Client polls the status using the `/jobs/{id}` endpoint.
+
+---
+
+### Poll Job Status
+
+Returns the current state and result of a background conversion task.
+
+```
+GET /api/v1/jobs/{job_id}
+```
+
+**Possible Job Statuses:**
+* `PENDING`: Job is in the queue.
+* `PROCESSING`: Job is currently being handled by a worker.
+* `COMPLETED`: Job finished successfully. Result contains Orthanc data.
+* `FAILED`: Job failed. Error field contains details.
+
+**Example Completed Response (200):**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "COMPLETED",
+  "result": {
+    "upload": { "ID": "...", "ParentStudy": "..." },
+    "modify": { "ID": "...", "PatientID": "..." }
+  },
+  "created_at": "2026-06-03T10:00:00Z",
+  "updated_at": "2026-06-03T10:00:05Z"
+}
+```
+
+---
+
+### `orthanc_modify` Payload
 
 This is the same payload format as Orthanc's `POST /studies/{id}/modify` API. The `Replace` field maps DICOM tag names to their desired values:
 
@@ -423,8 +471,9 @@ curl -X POST http://localhost:8080/api/v1/send-to-orthanc \
 ```
 
 **Behavior Notes:**
-- Uses **synchronous** modify — the API blocks until Orthanc completes the tag modification, so the response is always definitive (success or failure).
-- **Rollback on failure** — if the upload succeeds but tag modification fails, the uploaded instance is automatically deleted from Orthanc. No orphaned data.
+- Uses **asynchronous** processing — the API returns immediately. Background workers handle the DCMTK conversion and Orthanc interaction.
+- **Polling Required** — clients must poll `/api/v1/jobs/{id}` to know when the task is complete.
+- **Rollback on failure** — if the upload succeeds but tag modification fails, the background worker automatically deletes the uploaded instance from Orthanc. No orphaned data.
 - `KeepSource: false` — the original study (with incorrect tags) is replaced. Set to `true` if you want to keep the original.
 
 ---

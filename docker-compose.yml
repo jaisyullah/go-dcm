@@ -15,8 +15,8 @@ services:
       # Orthanc connection — point to your own Orthanc server
       - ORTHANC_URL=http://host.docker.internal
       - ORTHANC_PORT=8042
-      - ORTHANC_USER=orthanc
-      - ORTHANC_PASS=orthanc
+      - ORTHANC_USER=admin
+      - ORTHANC_PASS=orthanc123
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -39,7 +39,7 @@ services:
     environment:
       - ORTHANC__DICOM_AET=ORTHANC
       - ORTHANC__DICOM_PORT=4242
-      - ORTHANC__REGISTERED_USERS={"orthanc": "orthanc"}
+      - ORTHANC__REGISTERED_USERS={"orthanc":"orthanc"}
     volumes:
       - orthanc-data:/var/lib/orthanc/db
     restart: unless-stopped

@@ -206,7 +206,7 @@ func HandlePdf2Dcm(w http.ResponseWriter, r *http.Request) {
 
 	// Execute pdf2dcm (NOT dcmencap — which doesn't exist in DCMTK 3.6.9+)
 	args := reqBody.ToArgs()
-	if err := service.RunDCMTK("pdf2dcm", inputFilePath, outputFilePath, args); err != nil {
+	if err := service.RunDCMTK(r.Context(), "pdf2dcm", inputFilePath, outputFilePath, args); err != nil {
 		model.WriteError(w, http.StatusInternalServerError, "CONVERSION_FAILED", "DICOM conversion failed", err.Error())
 		return
 	}

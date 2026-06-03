@@ -27,6 +27,9 @@ func main() {
 	loadUploadLimits()
 	loadOrthancConfig()
 
+	// Initialize background worker pool
+	service.InitWorkerPool()
+
 	// Setup router
 	r := router.SetupRouter()
 

@@ -170,12 +170,12 @@ func HandleStl2Dcm(w http.ResponseWriter, r *http.Request) {
 	out.Close()
 
 	outputFilePath := filepath.Join(tempDir, "output.dcm")
-
-	args := reqBody.ToArgs()
-	if err := service.RunDCMTK("stl2dcm", inputFilePath, outputFilePath, args); err != nil {
-		model.WriteError(w, http.StatusInternalServerError, "CONVERSION_FAILED", "STL to DICOM conversion failed", err.Error())
-		return
-	}
+// Execute stl2dcm
+args := reqBody.ToArgs()
+if err := service.RunDCMTK(r.Context(), "stl2dcm", inputFilePath, outputFilePath, args); err != nil {
+	model.WriteError(w, http.StatusInternalServerError, "CONVERSION_FAILED", "DICOM conversion failed", err.Error())
+	return
+}
 
 	outputFilename := resolveOutputFilename(reqBody.Keys, "stl_model")
 

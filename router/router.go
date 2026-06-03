@@ -38,6 +38,9 @@ func SetupRouter() *chi.Mux {
 			r.Post("/stl2dcm", handler.HandleStl2Dcm)
 		})
 
+		// Job status polling endpoint
+		r.Get("/jobs/{id}", handler.HandleGetJob)
+
 		// Convert & send directly to Orthanc
 		r.Post("/send-to-orthanc", handler.HandleSendToOrthanc)
 		r.Post("/send-to-orthanc-from-urls", handler.HandleSendToOrthancFromURLs)

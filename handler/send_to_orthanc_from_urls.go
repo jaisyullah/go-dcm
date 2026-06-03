@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,14 +25,8 @@ type SendToOrthancFromURLsRequest struct {
 	OrthancModify service.OrthancModifyRequest `json:"orthanc_modify"`
 }
 
-// SendToOrthancFromURLsResponse is the response returned to the caller.
-type SendToOrthancFromURLsResponse struct {
-	Status string                        `json:"status"`
-	Upload *service.OrthancUploadResponse `json:"upload"`
-	Modify json.RawMessage               `json:"modify"`
-}
-
 // HandleSendToOrthancFromURLs handles POST /api/v1/send-to-orthanc-from-urls
+// Now refactored to be ASYNCHRONOUS.
 func HandleSendToOrthancFromURLs(w http.ResponseWriter, r *http.Request) {
 	// Verify Orthanc is configured
 	if !OrthancCfg.IsConfigured() {
@@ -49,14 +44,9 @@ func HandleSendToOrthancFromURLs(w http.ResponseWriter, r *http.Request) {
 
 	// Validate filetype parameter
 	fileType := strings.TrimSpace(strings.ToLower(req.FileType))
-	if fileType == "" {
-		model.WriteError(w, http.StatusBadRequest, "MISSING_FILETYPE",
-			"Missing 'filetype' parameter. Must be one of: img, pdf, cda, stl", "")
-		return
-	}
-	if !supportedFileTypes[fileType] {
+	if fileType == "" || !supportedFileTypes[fileType] {
 		model.WriteError(w, http.StatusBadRequest, "INVALID_FILETYPE",
-			"Invalid 'filetype' parameter. Must be one of: img, pdf, cda, stl", "got: "+fileType)
+			"Invalid 'filetype' parameter. Must be one of: img, pdf, cda, stl", "")
 		return
 	}
 
@@ -66,142 +56,128 @@ func HandleSendToOrthancFromURLs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert parameters raw message to string
-	var paramsStr string
-	if len(req.Parameters) > 0 {
-		paramsStr = string(req.Parameters)
-	}
+	// 1. Create Background Job
+	jobID := service.CreateJob()
 
-	// Create temp directory for this batch
-	tempDir, err := os.MkdirTemp("", "send_to_orthanc_urls_*")
-	if err != nil {
-		slog.Error("failed to create temp directory", "error", err)
-		model.WriteError(w, http.StatusInternalServerError, "TEMP_DIR_ERROR",
-			"Failed to create temporary directory", "")
-		return
-	}
-	defer os.RemoveAll(tempDir)
-
-	// Keep track of uploaded instance IDs and the parent study ID
-	var uploadedInstanceIDs []string
-	var parentStudyID string
-	var lastUploadResp *service.OrthancUploadResponse
-
-	// HTTP client with a reasonable timeout for downloading files
-	httpClient := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-
-	// Download, convert, and upload each URL
-	for idx, urlStr := range req.URLs {
-		slog.Info("downloading file from URL", "index", idx, "url", urlStr)
-
-		// Get filename from URL
-		filename := fmt.Sprintf("image_%d.jpg", idx)
-		if parsedURL, err := url.Parse(urlStr); err == nil {
-			if base := filepath.Base(parsedURL.Path); base != "." && base != "/" {
-				filename = base
+	// 2. Enqueue Task
+	service.EnqueueTask(service.Task{
+		JobID: jobID,
+		ExecuteFunc: func(ctx context.Context) (any, error) {
+			// Convert parameters raw message to string
+			var paramsStr string
+			if len(req.Parameters) > 0 {
+				paramsStr = string(req.Parameters)
 			}
-		}
 
-		// Perform HTTP GET request to download file
-		resp, err := httpClient.Get(urlStr)
-		if err != nil {
-			slog.Error("failed to download file from URL", "url", urlStr, "error", err)
-			rollbackUploadedInstances(uploadedInstanceIDs)
-			model.WriteError(w, http.StatusBadGateway, "DOWNLOAD_FAILED",
-				fmt.Sprintf("Failed to download file from URL: %s", urlStr), err.Error())
-			return
-		}
-		defer resp.Body.Close()
+			// Create temp directory for this batch
+			tempDir, err := os.MkdirTemp("", "send_to_orthanc_urls_*")
+			if err != nil {
+				return nil, fmt.Errorf("failed to create temp directory: %w", err)
+			}
+			defer os.RemoveAll(tempDir)
 
-		if resp.StatusCode != http.StatusOK {
-			slog.Error("download URL returned non-200 status", "url", urlStr, "status", resp.StatusCode)
-			rollbackUploadedInstances(uploadedInstanceIDs)
-			model.WriteError(w, http.StatusBadGateway, "DOWNLOAD_BAD_STATUS",
-				fmt.Sprintf("Download URL returned status %d: %s", resp.StatusCode, urlStr), "")
-			return
-		}
+			var uploadedInstanceIDs []string
+			var parentStudyID string
+			var lastUploadResp *service.OrthancUploadResponse
 
-		// Save downloaded bytes to temp file
-		inputFilePath := filepath.Join(tempDir, fmt.Sprintf("%d_%s", idx, service.SanitizeFilename(filename)))
-		out, err := os.Create(inputFilePath)
-		if err != nil {
-			slog.Error("failed to create temp file", "error", err)
-			rollbackUploadedInstances(uploadedInstanceIDs)
-			model.WriteError(w, http.StatusInternalServerError, "FILE_SAVE_ERROR",
-				"Failed to save downloaded file locally", "")
-			return
-		}
+			httpClient := &http.Client{Timeout: 60 * time.Second}
 
-		if _, err := io.Copy(out, resp.Body); err != nil {
-			out.Close()
-			slog.Error("failed to write temp file", "error", err)
-			rollbackUploadedInstances(uploadedInstanceIDs)
-			model.WriteError(w, http.StatusInternalServerError, "FILE_WRITE_ERROR",
-				"Failed to write downloaded file locally", "")
-			return
-		}
-		out.Close()
+			// Download, convert, and upload each URL
+			for idx, urlStr := range req.URLs {
+				slog.InfoContext(ctx, "downloading file from URL", "index", idx, "url", urlStr)
 
-		outputFilePath := filepath.Join(tempDir, fmt.Sprintf("output_%d.dcm", idx))
+				filename := fmt.Sprintf("image_%d.jpg", idx)
+				if parsedURL, err := url.Parse(urlStr); err == nil {
+					if base := filepath.Base(parsedURL.Path); base != "." && base != "/" {
+						filename = base
+					}
+				}
 
-		// ── Step 1: Convert to DICOM ────────────────────────────────────────
-		if err := convertToDICOM(fileType, inputFilePath, outputFilePath, tempDir, filename, paramsStr); err != nil {
-			rollbackUploadedInstances(uploadedInstanceIDs)
-			model.WriteError(w, http.StatusInternalServerError, "CONVERSION_FAILED",
-				fmt.Sprintf("DICOM conversion failed for file %s", filename), err.Error())
-			return
-		}
+				// Create a cancellable request using the job context
+				httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+				if err != nil {
+					rollbackUploadedInstances(uploadedInstanceIDs)
+					return nil, fmt.Errorf("failed to create download request for %s: %w", urlStr, err)
+				}
 
-		// ── Step 2: Upload to Orthanc ───────────────────────────────────────
-		uploadResp, err := service.UploadInstance(&OrthancCfg, outputFilePath)
-		if err != nil {
-			rollbackUploadedInstances(uploadedInstanceIDs)
-			model.WriteError(w, http.StatusBadGateway, "ORTHANC_UPLOAD_FAILED",
-				"Failed to upload DICOM to Orthanc", err.Error())
-			return
-		}
+				resp, err := httpClient.Do(httpReq)
+				if err != nil {
+					rollbackUploadedInstances(uploadedInstanceIDs)
+					return nil, fmt.Errorf("failed to download %s: %w", urlStr, err)
+				}
+				defer resp.Body.Close()
 
-		uploadedInstanceIDs = append(uploadedInstanceIDs, uploadResp.ID)
-		lastUploadResp = uploadResp
-		if parentStudyID == "" {
-			parentStudyID = uploadResp.ParentStudy
-		}
-	}
+				if resp.StatusCode != http.StatusOK {
+					rollbackUploadedInstances(uploadedInstanceIDs)
+					return nil, fmt.Errorf("download URL %s returned status %d", urlStr, resp.StatusCode)
+				}
 
-	// ── Step 3: Modify study tags ───────────────────────────────────────
-	if parentStudyID != "" {
-		modifyResp, err := service.ModifyStudy(&OrthancCfg, parentStudyID, &req.OrthancModify)
-		if err != nil {
-			slog.Error("modify failed, rolling back uploads",
-				"study_id", parentStudyID,
-				"error", err,
-			)
-			rollbackUploadedInstances(uploadedInstanceIDs)
-			model.WriteError(w, http.StatusBadGateway, "ORTHANC_MODIFY_FAILED",
-				"Failed to modify study tags in Orthanc (uploads were rolled back)", err.Error())
-			return
-		}
+				inputFilePath := filepath.Join(tempDir, fmt.Sprintf("%d_%s", idx, service.SanitizeFilename(filename)))
+				out, err := os.Create(inputFilePath)
+				if err != nil {
+					rollbackUploadedInstances(uploadedInstanceIDs)
+					return nil, fmt.Errorf("failed to create temp file for %s: %w", filename, err)
+				}
 
-		// ── Step 4: Return combined response ────────────────────────────────
-		model.WriteJSON(w, http.StatusOK, SendToOrthancFromURLsResponse{
-			Status: "success",
-			Upload: lastUploadResp,
-			Modify: modifyResp,
-		})
-		return
-	}
+				if _, err := io.Copy(out, resp.Body); err != nil {
+					out.Close()
+					rollbackUploadedInstances(uploadedInstanceIDs)
+					return nil, fmt.Errorf("failed to save download %s: %w", filename, err)
+				}
+				out.Close()
 
-	model.WriteError(w, http.StatusInternalServerError, "UNKNOWN_ERROR", "An unexpected error occurred during processing", "")
+				outputFilePath := filepath.Join(tempDir, fmt.Sprintf("output_%d.dcm", idx))
+
+				// Step 1: Convert to DICOM
+				if err := convertToDICOM(ctx, fileType, inputFilePath, outputFilePath, tempDir, filename, paramsStr); err != nil {
+					rollbackUploadedInstances(uploadedInstanceIDs)
+					return nil, fmt.Errorf("DICOM conversion failed for %s: %w", filename, err)
+				}
+
+				// Step 2: Upload to Orthanc
+				uploadResp, err := service.UploadInstance(&OrthancCfg, outputFilePath)
+				if err != nil {
+					rollbackUploadedInstances(uploadedInstanceIDs)
+					return nil, fmt.Errorf("orthanc upload failed for %s: %w", filename, err)
+				}
+
+				uploadedInstanceIDs = append(uploadedInstanceIDs, uploadResp.ID)
+				lastUploadResp = uploadResp
+				if parentStudyID == "" {
+					parentStudyID = uploadResp.ParentStudy
+				}
+			}
+
+			// Step 3: Modify study tags
+			if parentStudyID != "" {
+				modifyResp, err := service.ModifyStudy(&OrthancCfg, parentStudyID, &req.OrthancModify)
+				if err != nil {
+					slog.ErrorContext(ctx, "modify failed, rolling back uploads", "study_id", parentStudyID, "error", err)
+					rollbackUploadedInstances(uploadedInstanceIDs)
+					return nil, fmt.Errorf("orthanc modify failed: %w", err)
+				}
+
+				return SendToOrthancResult{
+					Upload: lastUploadResp,
+					Modify: modifyResp,
+				}, nil
+			}
+
+			return nil, fmt.Errorf("no parent study ID resolved")
+		},
+	})
+
+	// 3. Respond with 202 Accepted and JobID
+	model.WriteJSON(w, http.StatusAccepted, SendToOrthancResponse{
+		Status: "success",
+		JobID:  jobID,
+	})
 }
 
 // rollbackUploadedInstances deletes all uploaded instances in case of any failure.
 func rollbackUploadedInstances(ids []string) {
 	for _, id := range ids {
 		slog.Warn("rolling back instance upload", "instance_id", id)
-		if err := service.DeleteInstance(&OrthancCfg, id); err != nil {
-			slog.Error("rollback failed: could not delete instance", "instance_id", id, "error", err)
-		}
+		_ = service.DeleteInstance(&OrthancCfg, id)
 	}
 }
