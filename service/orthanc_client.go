@@ -429,28 +429,59 @@ func findPatientInternalID(config *OrthancConfig, patientID string) (string, err
 	if err != nil {
 		return "", err
 	}
-	req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(bodyBytes), config)
-	if err != nil {
-		return "", err
+
+	maxRetries := 5
+	backoff := 1 * time.Second
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(bodyBytes), config)
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := orthancHTTPClient.Do(req)
+		if err != nil {
+			lastErr = err
+			slog.Warn("findPatientInternalID network error, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			slog.Warn("findPatientInternalID failed to read body, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("find patient internal ID failed with status %d: %s", resp.StatusCode, string(respBody))
+			if resp.StatusCode >= 500 {
+				slog.Warn("findPatientInternalID server error, retrying...", "status", resp.StatusCode, "attempt", attempt)
+				time.Sleep(backoff)
+				backoff *= 2
+				continue
+			}
+			return "", lastErr
+		}
+
+		var results []PatientFindResult
+		if err := json.Unmarshal(respBody, &results); err != nil {
+			return "", err
+		}
+		if len(results) == 0 {
+			return "", fmt.Errorf("patient not found in Orthanc")
+		}
+		return results[0].ID, nil
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := orthancHTTPClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("find patient internal ID failed with status %d: %s", resp.StatusCode, string(respBody))
-	}
-	var results []PatientFindResult
-	if err := json.Unmarshal(respBody, &results); err != nil {
-		return "", err
-	}
-	if len(results) == 0 {
-		return "", fmt.Errorf("patient not found in Orthanc")
-	}
-	return results[0].ID, nil
+
+	return "", fmt.Errorf("failed to find patient internal ID after %d attempts: %w", maxRetries, lastErr)
 }
 
 // modifyPatient updates patient-level demographics in Orthanc.
@@ -475,21 +506,52 @@ func modifyPatient(config *OrthancConfig, patientInternalID string, name, birthD
 	if err != nil {
 		return err
 	}
-	req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(bodyBytes), config)
-	if err != nil {
-		return err
+
+	maxRetries := 5
+	backoff := 1 * time.Second
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(bodyBytes), config)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := orthancHTTPClient.Do(req)
+		if err != nil {
+			lastErr = err
+			slog.Warn("modifyPatient network error, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			slog.Warn("modifyPatient failed to read body, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("patient modify failed with status %d: %s", resp.StatusCode, string(respBody))
+			if resp.StatusCode >= 500 {
+				slog.Warn("modifyPatient server error, retrying...", "status", resp.StatusCode, "attempt", attempt)
+				time.Sleep(backoff)
+				backoff *= 2
+				continue
+			}
+			return lastErr
+		}
+
+		return nil
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := orthancHTTPClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("patient modify failed with status %d: %s", resp.StatusCode, string(respBody))
-	}
-	return nil
+
+	return fmt.Errorf("failed to modify patient after %d attempts: %w", maxRetries, lastErr)
 }
 
 // findStudyIDByCriteria queries Orthanc's POST /tools/find to retrieve a Study ID matching PatientID, StudyDate, and Modality.
@@ -513,28 +575,63 @@ func findStudyIDByCriteria(config *OrthancConfig, patientID, studyDate, modality
 	if err != nil {
 		return "", err
 	}
-	req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(bodyBytes), config)
-	if err != nil {
-		return "", err
+
+	maxRetries := 5
+	backoff := 1 * time.Second
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(bodyBytes), config)
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := orthancHTTPClient.Do(req)
+		if err != nil {
+			lastErr = err
+			slog.Warn("findStudyIDByCriteria network error, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			slog.Warn("findStudyIDByCriteria failed to read body, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("find study by criteria failed with status %d: %s", resp.StatusCode, string(respBody))
+			if resp.StatusCode >= 500 {
+				slog.Warn("findStudyIDByCriteria server error, retrying...", "status", resp.StatusCode, "attempt", attempt)
+				time.Sleep(backoff)
+				backoff *= 2
+				continue
+			}
+			return "", lastErr
+		}
+
+		var results []struct {
+			ID string `json:"ID"`
+		}
+		if err := json.Unmarshal(respBody, &results); err != nil {
+			return "", err
+		}
+		if len(results) == 0 {
+			lastErr = fmt.Errorf("study not found by criteria")
+			slog.Warn("findStudyIDByCriteria: study not indexed yet, retrying...", "attempt", attempt)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+		return results[0].ID, nil
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := orthancHTTPClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("find study by criteria failed with status %d: %s", resp.StatusCode, string(respBody))
-	}
-	var results []struct {
-		ID string `json:"ID"`
-	}
-	if err := json.Unmarshal(respBody, &results); err != nil {
-		return "", err
-	}
-	if len(results) == 0 {
-		return "", fmt.Errorf("study not found by criteria")
-	}
-	return results[0].ID, nil
+
+	return "", fmt.Errorf("failed to find study after %d attempts: %w", maxRetries, lastErr)
 }
