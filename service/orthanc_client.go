@@ -274,15 +274,7 @@ func ModifyStudy(config *OrthancConfig, studyID string, modifyReq *OrthancModify
 				}
 			}
 
-			// 2. Retry on server errors (status >= 500)
-			if resp.StatusCode >= 500 {
-				slog.Warn("Orthanc modify returned server error, retrying...", "status", resp.StatusCode, "attempt", attempt)
-				time.Sleep(backoff)
-				backoff *= 2
-				continue
-			}
-
-			// For all other client errors (4xx), fail immediately
+			// For all server (5xx) and client (4xx) errors, fail immediately to prevent study duplication under SQLite locks
 			return nil, lastErr
 		}
 
@@ -539,12 +531,6 @@ func modifyPatient(config *OrthancConfig, patientInternalID string, name, birthD
 
 		if resp.StatusCode != http.StatusOK {
 			lastErr = fmt.Errorf("patient modify failed with status %d: %s", resp.StatusCode, string(respBody))
-			if resp.StatusCode >= 500 {
-				slog.Warn("modifyPatient server error, retrying...", "status", resp.StatusCode, "attempt", attempt)
-				time.Sleep(backoff)
-				backoff *= 2
-				continue
-			}
 			return lastErr
 		}
 
