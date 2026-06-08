@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -622,9 +623,32 @@ func findStudyIDByCriteria(config *OrthancConfig, patientID, studyDate, modality
 	return "", fmt.Errorf("failed to find study after %d attempts: %w", maxRetries, lastErr)
 }
 
+var (
+	patientLocks   = make(map[string]*sync.Mutex)
+	patientLocksMu sync.Mutex
+)
+
+func getPatientLock(patientID string) *sync.Mutex {
+	patientLocksMu.Lock()
+	defer patientLocksMu.Unlock()
+
+	lock, ok := patientLocks[patientID]
+	if !ok {
+		lock = &sync.Mutex{}
+		patientLocks[patientID] = lock
+	}
+	return lock
+}
+
 // AlignPatientDemographicsBackground performs demographic modification of a patient resource in the background.
 // It runs with a startup delay to avoid lock contention with active uploads, and retries safely using backoff.
+// Mutex serialization is used per patientID to prevent concurrent file conflicts in Orthanc.
 func AlignPatientDemographicsBackground(config *OrthancConfig, patientID, name, birthDate, sex string) {
+	// Obtain the mutex lock specifically for this patientID to serialize operations
+	lock := getPatientLock(patientID)
+	lock.Lock()
+	defer lock.Unlock()
+
 	// Wait 2 seconds for active database write transactions to stabilize.
 	time.Sleep(2 * time.Second)
 
