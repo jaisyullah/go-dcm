@@ -703,6 +703,79 @@ func getPatientLock(patientID string) *sync.Mutex {
 	return lock
 }
 
+// findPatientDetails queries Orthanc's POST /tools/find to retrieve the patient's internal ID and main tags.
+func findPatientDetails(config *OrthancConfig, patientID string) (*PatientFindResult, error) {
+	url := fmt.Sprintf("%s/tools/find", config.BaseURL())
+	queryPayload := map[string]any{
+		"Level":  "Patient",
+		"Expand": true,
+		"Query": map[string]string{
+			"PatientID": patientID,
+		},
+	}
+	bodyBytes, err := json.Marshal(queryPayload)
+	if err != nil {
+		return nil, err
+	}
+
+	maxRetries := 5
+	backoff := 1 * time.Second
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(bodyBytes), config)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := orthancHTTPClient.Do(req)
+		if err != nil {
+			lastErr = err
+			slog.Warn("findPatientDetails network error, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			slog.Warn("findPatientDetails failed to read body, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("find patient details failed with status %d: %s", resp.StatusCode, string(respBody))
+			if resp.StatusCode >= 500 {
+				slog.Warn("findPatientDetails server error, retrying...", "status", resp.StatusCode, "attempt", attempt)
+				time.Sleep(backoff)
+				backoff *= 2
+				continue
+			}
+			return nil, lastErr
+		}
+
+		var results []PatientFindResult
+		if err := json.Unmarshal(respBody, &results); err != nil {
+			return nil, err
+		}
+		if len(results) == 0 {
+			lastErr = fmt.Errorf("patient not found in Orthanc (indexing delay)")
+			slog.Warn("findPatientDetails: patient not indexed yet, retrying...", "patient_id", patientID, "attempt", attempt)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+		return &results[0], nil
+	}
+
+	return nil, fmt.Errorf("failed to find patient details after %d attempts: %w", maxRetries, lastErr)
+}
+
 // AlignPatientDemographicsBackground performs demographic modification of a patient resource in the background.
 // It runs with a startup delay to avoid lock contention with active uploads, and retries safely using backoff.
 // Mutex serialization is used per patientID to prevent concurrent file conflicts in Orthanc.
@@ -712,14 +785,22 @@ func AlignPatientDemographicsBackground(config *OrthancConfig, patientID, name, 
 	lock.Lock()
 	defer lock.Unlock()
 
-	// Wait 2 seconds for active database write transactions to stabilize.
-	time.Sleep(2 * time.Second)
+	// Wait 100ms for active database write transactions to stabilize.
+	time.Sleep(100 * time.Millisecond)
 
 	slog.Info("Background demographic alignment started", "patient_id", patientID, "name", name, "birth_date", birthDate, "sex", sex)
 
-	patientInternalID, err := findPatientInternalID(config, patientID)
+	patientDetails, err := findPatientDetails(config, patientID)
 	if err != nil {
-		slog.Error("Background demographic alignment failed: could not find patient in Orthanc", "patient_id", patientID, "error", err)
+		slog.Error("Background demographic alignment failed: could not find patient details in Orthanc", "patient_id", patientID, "error", err)
+		return
+	}
+
+	// If patient demographics already match our target demographics, skip the heavy modify operation!
+	if patientDetails.MainDicomTags.PatientName == name &&
+		patientDetails.MainDicomTags.PatientBirthDate == birthDate &&
+		patientDetails.MainDicomTags.PatientSex == sex {
+		slog.Info("Background demographic alignment skipped: demographics already match target", "patient_id", patientID, "name", name)
 		return
 	}
 
@@ -727,7 +808,7 @@ func AlignPatientDemographicsBackground(config *OrthancConfig, patientID, name, 
 	backoff := 2 * time.Second
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		err = modifyPatient(config, patientInternalID, name, birthDate, sex)
+		err = modifyPatient(config, patientDetails.ID, name, birthDate, sex)
 		if err == nil {
 			slog.Info("Background demographic alignment completed successfully", "patient_id", patientID, "name", name)
 			return
