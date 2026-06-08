@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"runtime"
 
-	"go-dcm/model"
-	"go-dcm/service"
+	"dicom-converter-api/model"
+	"dicom-converter-api/service"
 )
 
 // AppVersion is set at build time or defaults to "dev".

@@ -52,15 +52,15 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t go-dcm:test .
+          docker build -t dicom-converter-api:test .
 
       - name: Test Docker image health
         run: |
-          docker run -d --name go-dcm-test -p 8080:8080 go-dcm:test
+          docker run -d --name dicom-converter-api-test -p 8080:8080 dicom-converter-api:test
           sleep 5
           curl -f http://localhost:8080/health || exit 1
-          docker stop go-dcm-test
-          docker rm go-dcm-test
+          docker stop dicom-converter-api-test
+          docker rm dicom-converter-api-test
 
   lint:
     runs-on: ubuntu-latest

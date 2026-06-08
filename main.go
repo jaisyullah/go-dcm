@@ -10,9 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"go-dcm/handler"
-	"go-dcm/router"
-	"go-dcm/service"
+	"dicom-converter-api/handler"
+	"dicom-converter-api/router"
+	"dicom-converter-api/service"
 )
 
 func main() {
@@ -44,7 +44,7 @@ func main() {
 
 	// Start server in goroutine
 	go func() {
-		slog.Info("starting go-dcm server",
+		slog.Info("starting dicom-converter-api server",
 			"port", port,
 			"version", handler.AppVersion,
 		)

@@ -7,7 +7,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"go-dcm/handler"
+	"dicom-converter-api/handler"
 )
 
 // SetupRouter configures all routes and middleware for the API.

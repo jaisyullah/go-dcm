@@ -6,7 +6,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"go-dcm/service"
+	"dicom-converter-api/service"
 )
 
 // HandleModifyStudy receives a JSON payload for Orthanc tags modification and forwards it to the service layer.

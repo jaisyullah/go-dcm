@@ -4,7 +4,7 @@
 *.dll
 *.so
 *.dylib
-go-dcm
+dicom-converter-api
 
 # Test binary, built with `go test -c`
 *.test

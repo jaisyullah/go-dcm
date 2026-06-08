@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"go-dcm/model"
-	"go-dcm/service"
+	"dicom-converter-api/model"
+	"dicom-converter-api/service"
 )
 
 // MaxImageUploadSize is the maximum allowed image upload size (configurable via env).

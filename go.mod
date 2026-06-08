@@ -1,4 +1,4 @@
-module go-dcm
+module dicom-converter-api
 
 go 1.25.0
 

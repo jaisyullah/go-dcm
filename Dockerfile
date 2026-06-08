@@ -12,8 +12,8 @@ RUN go mod download
 # Copy source and build
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build \
-    -ldflags="-s -w -X go-dcm/handler.AppVersion=$(git describe --tags --always --dirty 2>/dev/null || echo 'docker')" \
-    -o /go-dcm .
+    -ldflags="-s -w -X dicom-converter-api/handler.AppVersion=$(git describe --tags --always --dirty 2>/dev/null || echo 'docker')" \
+    -o /dicom-converter-api .
 
 # ============================================================
 # Stage 2: Minimal runtime image
@@ -29,18 +29,18 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
-RUN groupadd -r godcm && useradd -r -g godcm -d /app -s /sbin/nologin godcm
+RUN groupadd -r dicomconv && useradd -r -g dicomconv -d /app -s /sbin/nologin dicomconv
 
 WORKDIR /app
 
 # Copy binary from builder
-COPY --from=builder /go-dcm .
+COPY --from=builder /dicom-converter-api .
 
 # Create temp directory for conversions
-RUN mkdir -p /tmp/dcm && chown godcm:godcm /tmp/dcm
+RUN mkdir -p /tmp/dcm && chown dicomconv:dicomconv /tmp/dcm
 
 # Switch to non-root user
-USER godcm
+USER dicomconv
 
 # Environment defaults
 ENV PORT=8080
@@ -54,4 +54,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD ["curl", "-f", "http://localhost:8080/health"]
 
-ENTRYPOINT ["/app/go-dcm"]
+ENTRYPOINT ["/app/dicom-converter-api"]

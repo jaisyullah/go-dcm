@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"go-dcm/model"
-	"go-dcm/service"
+	"dicom-converter-api/model"
+	"dicom-converter-api/service"
 )
 
 // MaxSTLUploadSize is the maximum allowed STL upload size.

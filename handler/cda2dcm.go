@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"go-dcm/model"
-	"go-dcm/service"
+	"dicom-converter-api/model"
+	"dicom-converter-api/service"
 )
 
 // MaxCDAUploadSize is the maximum allowed CDA upload size.

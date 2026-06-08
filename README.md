@@ -1,4 +1,4 @@
-# go-dcm — DICOM Conversion & Orthanc Integration REST API
+# dicom-converter-api — DICOM Conversion & Orthanc Integration REST API
 
 [![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![DCMTK](https://img.shields.io/badge/DCMTK-3.6.7+-orange)](https://dicom.offis.de/dcmtk.php.en)
@@ -58,7 +58,7 @@ A production-grade Go REST API for converting images (JPEG, PNG, BMP), PDFs, CDA
 
 ```
                                 ┌─────────────────────────────────────────┐
-                                │              go-dcm API                 │
+                                │              dicom-converter-api API                 │
                                 │                                         │
   ┌──────────┐   POST           │  ┌──────────┐    ┌──────────────────┐   │     ┌──────────┐
   │  Client   │ ──────────────► │  │ Handlers │───►│  Worker Pool     │   │     │          │
@@ -143,13 +143,13 @@ curl http://localhost:8080/health
 ### Run Standalone (Docker)
 
 ```bash
-docker build -t go-dcm .
+docker build -t dicom-converter-api .
 docker run -p 8080:8080 \
   -e ORTHANC_URL=http://your-orthanc-server \
   -e ORTHANC_PORT=8042 \
   -e ORTHANC_USER=your_user \
   -e ORTHANC_PASS=your_pass \
-  go-dcm
+  dicom-converter-api
 ```
 
 ---
@@ -480,7 +480,7 @@ curl -X POST http://localhost:8080/api/v1/send-to-orthanc \
 
 ## Self-Recovery & Reliability
 
-To ensure zero data loss and absolute reliability in production hospital environments, `go-dcm` includes automated self-recovery mechanisms:
+To ensure zero data loss and absolute reliability in production hospital environments, `dicom-converter-api` includes automated self-recovery mechanisms:
 
 ### 1. Transient Error Self-Healing (Exponential Backoff Retries)
 * **What it solves**: Transient server write failures (like Orthanc filesystem locks, full-disk scenarios, or minor network latency glitches).
@@ -489,7 +489,7 @@ To ensure zero data loss and absolute reliability in production hospital environ
 ### 2. Patient Demographic Mismatch Auto-Alignment
 * **What it solves**: Orthanc rejects study modifications with `HTTP 400 Bad Request` if the target `PatientID` already exists in the database and has other studies but the new demographic tags (e.g. `PatientName`, `PatientBirthDate`, `PatientSex`) have spelling or formatting mismatches.
 * **How it works**:
-  1. If `/studies/{id}/modify` returns `400 Bad Request` with a demographic mismatch error, `go-dcm` intercepts the error.
+  1. If `/studies/{id}/modify` returns `400 Bad Request` with a demographic mismatch error, `dicom-converter-api` intercepts the error.
   2. It queries Orthanc's `/tools/find` endpoint to fetch the existing patient's main DICOM tags exactly as stored in Orthanc.
   3. It auto-aligns the modify request payload's demographics (`PatientName`, `PatientBirthDate`, `PatientSex`) to match the existing patient's demographics character-for-character.
   4. It automatically retries the modification with the aligned metadata, guaranteeing a successful mapping and database sync without manual intervention!
@@ -601,11 +601,11 @@ dcmdump output.dcm
 ## Project Structure
 
 ```
-go-dcm/
+dicom-converter-api/
 ├── main.go                      # Entry point, graceful shutdown, config loading
 ├── go.mod / go.sum              # Go module dependencies
 ├── Dockerfile                   # Multi-stage Docker build (non-root)
-├── docker-compose.yml           # go-dcm + Orthanc (test instance)
+├── docker-compose.yml           # dicom-converter-api + Orthanc (test instance)
 ├── openapi.yaml                 # OpenAPI 3.0 specification
 ├── handler/
 │   ├── img2dcm.go               # Image → DICOM endpoint
@@ -643,4 +643,4 @@ MIT License — See [LICENSE](LICENSE) for details.
 
 Original implementation by **Jaisyullah Rafiul Islam** for the **Transformation and Digitalization Team, Ministry of Health Indonesia**.
 
-Refactored and hardened by the go-dcm community.
+Refactored and hardened by the dicom-converter-api community.

@@ -5,8 +5,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"go-dcm/model"
-	"go-dcm/service"
+	"dicom-converter-api/model"
+	"dicom-converter-api/service"
 )
 
 // HandleGetJob returns the current status and result of a background job.

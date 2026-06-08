@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"go-dcm/model"
-	"go-dcm/service"
+	"dicom-converter-api/model"
+	"dicom-converter-api/service"
 )
 
 // SendToOrthancFromURLsRequest represents the JSON request payload for URL-based conversions.

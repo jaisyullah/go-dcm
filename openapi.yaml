@@ -1,14 +1,14 @@
 openapi: 3.0.3
 info:
-  title: go-dcm DICOM Conversion API
+  title: dicom-converter-api DICOM Conversion API
   description: |
     REST API for converting images and documents to DICOM (.dcm) format
     using DCMTK command-line tools. Supports JPEG, PNG, BMP images,
     PDF documents, CDA clinical documents, and STL 3D models.
   version: 2.0.0
   contact:
-    name: go-dcm
-    url: https://github.com/malifnasrulloh/go-dcm
+    name: dicom-converter-api
+    url: https://github.com/malifnasrulloh/dicom-converter-api
 
 servers:
   - url: http://localhost:8080

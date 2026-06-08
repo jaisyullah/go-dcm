@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"time"
 
-	"go-dcm/model"
-	"go-dcm/service"
+	"dicom-converter-api/model"
+	"dicom-converter-api/service"
 )
 
 // MaxPDFUploadSize is the maximum allowed PDF upload size (configurable via env).

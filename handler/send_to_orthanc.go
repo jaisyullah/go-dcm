@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"go-dcm/model"
-	"go-dcm/service"
+	"dicom-converter-api/model"
+	"dicom-converter-api/service"
 )
 
 // OrthancCfg is the global Orthanc configuration, loaded at startup.
