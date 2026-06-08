@@ -147,11 +147,43 @@ func HandleSendToOrthanc(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Step 3: Modify study tags
+			// Extract demographics before stripping for background alignment
+			var patientID, patientName, patientBirthDate, patientSex string
+			if modifyReq.Replace != nil {
+				if pid, ok := modifyReq.Replace["PatientID"].(string); ok {
+					patientID = pid
+				}
+				if name, ok := modifyReq.Replace["PatientName"].(string); ok {
+					patientName = name
+				}
+				if dob, ok := modifyReq.Replace["PatientBirthDate"].(string); ok {
+					patientBirthDate = dob
+				}
+				if sex, ok := modifyReq.Replace["PatientSex"].(string); ok {
+					patientSex = sex
+				}
+			}
+
+			// Strip patient demographics from Replace payload because they were already embedded
+			// in the DICOM instances during conversion. This avoids triggering demographic mismatch (400)
+			// and patient-level modify (500) errors in Orthanc under SQLite locks.
+			if modifyReq.Replace != nil {
+				delete(modifyReq.Replace, "PatientName")
+				delete(modifyReq.Replace, "PatientBirthDate")
+				delete(modifyReq.Replace, "PatientSex")
+				delete(modifyReq.Replace, "PatientID")
+			}
+
 			modifyResp, err := service.ModifyStudy(&OrthancCfg, uploadResp.ParentStudy, &modifyReq)
 			if err != nil {
 				slog.Error("modify failed, rolling back upload", "job_id", jobID, "instance_id", uploadResp.ID, "error", err)
 				_ = service.DeleteInstance(&OrthancCfg, uploadResp.ID)
 				return nil, fmt.Errorf("orthanc modify failed: %w", err)
+			}
+
+			// Trigger asynchronous background demographic synchronization
+			if patientID != "" {
+				go service.AlignPatientDemographicsBackground(&OrthancCfg, patientID, patientName, patientBirthDate, patientSex)
 			}
 
 			// Success! Return the combined result

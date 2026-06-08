@@ -621,3 +621,36 @@ func findStudyIDByCriteria(config *OrthancConfig, patientID, studyDate, modality
 
 	return "", fmt.Errorf("failed to find study after %d attempts: %w", maxRetries, lastErr)
 }
+
+// AlignPatientDemographicsBackground performs demographic modification of a patient resource in the background.
+// It runs with a startup delay to avoid lock contention with active uploads, and retries safely using backoff.
+func AlignPatientDemographicsBackground(config *OrthancConfig, patientID, name, birthDate, sex string) {
+	// Wait 2 seconds for active database write transactions to stabilize.
+	time.Sleep(2 * time.Second)
+
+	slog.Info("Background demographic alignment started", "patient_id", patientID, "name", name, "birth_date", birthDate, "sex", sex)
+
+	patientInternalID, err := findPatientInternalID(config, patientID)
+	if err != nil {
+		slog.Error("Background demographic alignment failed: could not find patient in Orthanc", "patient_id", patientID, "error", err)
+		return
+	}
+
+	maxAttempts := 5
+	backoff := 2 * time.Second
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err = modifyPatient(config, patientInternalID, name, birthDate, sex)
+		if err == nil {
+			slog.Info("Background demographic alignment completed successfully", "patient_id", patientID, "name", name)
+			return
+		}
+
+		slog.Warn("Background demographic alignment retry", "patient_id", patientID, "attempt", attempt, "error", err)
+		time.Sleep(backoff)
+		backoff *= 2
+	}
+
+	slog.Error("Background demographic alignment failed after maximum attempts", "patient_id", patientID, "error", err)
+}
+
