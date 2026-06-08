@@ -477,7 +477,63 @@ func findPatientInternalID(config *OrthancConfig, patientID string) (string, err
 	return "", fmt.Errorf("failed to find patient internal ID after %d attempts: %w", maxRetries, lastErr)
 }
 
-// modifyPatient updates patient-level demographics in Orthanc.
+// JobResponse represents the response from an asynchronous Orthanc job creation.
+type JobResponse struct {
+	ID   string `json:"ID"`
+	Path string `json:"Path"`
+}
+
+// OrthancJobStatus represents the response from GET /jobs/{id}.
+type OrthancJobStatus struct {
+	State string `json:"State"`
+}
+
+func waitForJobCompletion(config *OrthancConfig, jobID string) error {
+	url := fmt.Sprintf("%s/jobs/%s", config.BaseURL(), jobID)
+	timeout := time.After(60 * time.Second)
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-timeout:
+			return fmt.Errorf("timeout waiting for Orthanc job %s", jobID)
+		case <-ticker.C:
+			req, err := newOrthancRequest(http.MethodGet, url, nil, config)
+			if err != nil {
+				return err
+			}
+			resp, err := orthancHTTPClient.Do(req)
+			if err != nil {
+				continue
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				continue
+			}
+
+			bodyBytes, err := io.ReadAll(resp.Body)
+			if err != nil {
+				continue
+			}
+
+			var status OrthancJobStatus
+			if err := json.Unmarshal(bodyBytes, &status); err != nil {
+				continue
+			}
+
+			switch status.State {
+			case "Success":
+				return nil
+			case "Failure":
+				return fmt.Errorf("Orthanc job %s failed in background", jobID)
+			}
+		}
+	}
+}
+
+// modifyPatient updates patient-level demographics in Orthanc asynchronously.
 func modifyPatient(config *OrthancConfig, patientInternalID string, name, birthDate, sex string) error {
 	url := fmt.Sprintf("%s/patients/%s/modify", config.BaseURL(), patientInternalID)
 	replace := map[string]string{}
@@ -491,9 +547,10 @@ func modifyPatient(config *OrthancConfig, patientInternalID string, name, birthD
 		replace["PatientSex"] = sex
 	}
 	payload := map[string]any{
-		"Replace":    replace,
-		"KeepSource": false,
-		"Force":      true,
+		"Replace":      replace,
+		"KeepSource":   false,
+		"Force":        true,
+		"Asynchronous": true,
 	}
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -535,7 +592,13 @@ func modifyPatient(config *OrthancConfig, patientInternalID string, name, birthD
 			return lastErr
 		}
 
-		return nil
+		var jobResp JobResponse
+		if err := json.Unmarshal(respBody, &jobResp); err != nil {
+			return fmt.Errorf("failed to parse job creation response: %w", err)
+		}
+
+		slog.Info("Orthanc background modify job created successfully", "job_id", jobResp.ID)
+		return waitForJobCompletion(config, jobResp.ID)
 	}
 
 	return fmt.Errorf("failed to modify patient after %d attempts: %w", maxRetries, lastErr)
