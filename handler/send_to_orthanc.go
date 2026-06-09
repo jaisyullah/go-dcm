@@ -133,21 +133,7 @@ func HandleSendToOrthanc(w http.ResponseWriter, r *http.Request) {
 			// Cleanup files when the job finishes (even if it fails)
 			defer os.RemoveAll(tempDir)
 
-			outputFilePath := filepath.Join(tempDir, "output.dcm")
-
-			// Step 1: Convert to DICOM
-			if err := convertToDICOM(ctx, fileType, inputFilePath, outputFilePath, tempDir, fileHeader.Filename, paramsStr); err != nil {
-				return nil, fmt.Errorf("conversion failed: %w", err)
-			}
-
-			// Step 2: Upload to Orthanc
-			uploadResp, err := service.UploadInstance(&OrthancCfg, outputFilePath)
-			if err != nil {
-				return nil, fmt.Errorf("orthanc upload failed: %w", err)
-			}
-
-			// Step 3: Modify study tags
-			// Extract demographics before stripping for background alignment
+			// Extract demographics for pre-emptive alignment
 			var patientID, patientName, patientBirthDate, patientSex string
 			if modifyReq.Replace != nil {
 				if pid, ok := modifyReq.Replace["PatientID"].(string); ok {
@@ -164,6 +150,27 @@ func HandleSendToOrthanc(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
+			// Pre-emptively align patient demographics in Orthanc if they mismatch
+			if patientID != "" {
+				if err := service.PreemptiveAlignPatientDemographics(&OrthancCfg, patientID, patientName, patientBirthDate, patientSex); err != nil {
+					return nil, fmt.Errorf("demographic alignment failed: %w", err)
+				}
+			}
+
+			outputFilePath := filepath.Join(tempDir, "output.dcm")
+
+			// Step 1: Convert to DICOM
+			if err := convertToDICOM(ctx, fileType, inputFilePath, outputFilePath, tempDir, fileHeader.Filename, paramsStr); err != nil {
+				return nil, fmt.Errorf("conversion failed: %w", err)
+			}
+
+			// Step 2: Upload to Orthanc
+			uploadResp, err := service.UploadInstance(&OrthancCfg, outputFilePath)
+			if err != nil {
+				return nil, fmt.Errorf("orthanc upload failed: %w", err)
+			}
+
+			// Step 3: Modify study tags
 			// Strip patient demographics from Replace payload because they were already embedded
 			// in the DICOM instances during conversion. This avoids triggering demographic mismatch (400)
 			// and patient-level modify (500) errors in Orthanc under SQLite locks.
@@ -179,11 +186,6 @@ func HandleSendToOrthanc(w http.ResponseWriter, r *http.Request) {
 				slog.Error("modify failed, rolling back upload", "job_id", jobID, "instance_id", uploadResp.ID, "error", err)
 				_ = service.DeleteInstance(&OrthancCfg, uploadResp.ID)
 				return nil, fmt.Errorf("orthanc modify failed: %w", err)
-			}
-
-			// Trigger asynchronous background demographic synchronization
-			if patientID != "" {
-				go service.AlignPatientDemographicsBackground(&OrthancCfg, patientID, patientName, patientBirthDate, patientSex)
 			}
 
 			// Success! Return the combined result

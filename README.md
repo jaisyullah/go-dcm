@@ -58,13 +58,13 @@ A production-grade Go REST API for converting images (JPEG, PNG, BMP), PDFs, CDA
 
 ```
                                 ┌─────────────────────────────────────────┐
-                                │              dicom-converter-api API                 │
+                                │              dicom-converter-api API    │
                                 │                                         │
   ┌──────────┐   POST           │  ┌──────────┐    ┌──────────────────┐   │     ┌──────────┐
-  │  Client   │ ──────────────► │  │ Handlers │───►│  Worker Pool     │   │     │          │
-  │ (curl,    │   multipart     │  │ (Async)  │    │ (Bounded Concur.)│───┼────►│  Orthanc │
-  │  app,     │   form-data     │  │          │    └──────────────────┘   │     │   PACS   │
-  │  SIMRS)   │ ◄────────────── │  │          │             │             │     │          │
+  │  Client  │ ──────────────►  │  │ Handlers │───►│  Worker Pool     │   │     │          │
+  │ (curl,   │   multipart      │  │ (Async)  │    │ (Bounded Concur.)│───┼────►│  Orthanc │
+  │  app,    │   form-data      │  │          │    └──────────────────┘   │     │   PACS   │
+  │  SIMRS)  │ ◄──────────────  │  │          │             │             │     │          │
   └──────────┘   202 Accepted   │  └──────────┘             ▼             │     └──────────┘
        │          (job_id)      │         │        ┌──────────────────┐   │       ▲    │
        │                        │         │        │ DCMTK (img2dcm,  │   │       │    │

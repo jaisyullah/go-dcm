@@ -63,6 +63,30 @@ func HandleSendToOrthancFromURLs(w http.ResponseWriter, r *http.Request) {
 	service.EnqueueTask(service.Task{
 		JobID: jobID,
 		ExecuteFunc: func(ctx context.Context) (any, error) {
+			// Extract demographics for pre-emptive alignment
+			var patientID, patientName, patientBirthDate, patientSex string
+			if req.OrthancModify.Replace != nil {
+				if pid, ok := req.OrthancModify.Replace["PatientID"].(string); ok {
+					patientID = pid
+				}
+				if name, ok := req.OrthancModify.Replace["PatientName"].(string); ok {
+					patientName = name
+				}
+				if dob, ok := req.OrthancModify.Replace["PatientBirthDate"].(string); ok {
+					patientBirthDate = dob
+				}
+				if sex, ok := req.OrthancModify.Replace["PatientSex"].(string); ok {
+					patientSex = sex
+				}
+			}
+
+			// Pre-emptively align patient demographics in Orthanc if they mismatch
+			if patientID != "" {
+				if err := service.PreemptiveAlignPatientDemographics(&OrthancCfg, patientID, patientName, patientBirthDate, patientSex); err != nil {
+					return nil, fmt.Errorf("demographic alignment failed: %w", err)
+				}
+			}
+
 			// Convert parameters raw message to string
 			var paramsStr string
 			if len(req.Parameters) > 0 {
@@ -150,23 +174,6 @@ func HandleSendToOrthancFromURLs(w http.ResponseWriter, r *http.Request) {
 
 			// Step 3: Modify study tags
 			if parentStudyID != "" {
-				// Extract demographics before stripping for background alignment
-				var patientID, patientName, patientBirthDate, patientSex string
-				if req.OrthancModify.Replace != nil {
-					if pid, ok := req.OrthancModify.Replace["PatientID"].(string); ok {
-						patientID = pid
-					}
-					if name, ok := req.OrthancModify.Replace["PatientName"].(string); ok {
-						patientName = name
-					}
-					if dob, ok := req.OrthancModify.Replace["PatientBirthDate"].(string); ok {
-						patientBirthDate = dob
-					}
-					if sex, ok := req.OrthancModify.Replace["PatientSex"].(string); ok {
-						patientSex = sex
-					}
-				}
-
 				// Strip patient demographics from Replace payload because they were already embedded
 				// in the DICOM instances during conversion. This avoids triggering demographic mismatch (400)
 				// and patient-level modify (500) errors in Orthanc under SQLite locks.
@@ -182,11 +189,6 @@ func HandleSendToOrthancFromURLs(w http.ResponseWriter, r *http.Request) {
 					slog.ErrorContext(ctx, "modify failed, rolling back uploads", "study_id", parentStudyID, "error", err)
 					rollbackUploadedInstances(uploadedInstanceIDs)
 					return nil, fmt.Errorf("orthanc modify failed: %w", err)
-				}
-
-				// Trigger asynchronous background demographic synchronization
-				if patientID != "" {
-					go service.AlignPatientDemographicsBackground(&OrthancCfg, patientID, patientName, patientBirthDate, patientSex)
 				}
 
 				return SendToOrthancResult{

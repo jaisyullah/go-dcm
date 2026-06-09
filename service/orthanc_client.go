@@ -776,49 +776,239 @@ func findPatientDetails(config *OrthancConfig, patientID string) (*PatientFindRe
 	return nil, fmt.Errorf("failed to find patient details after %d attempts: %w", maxRetries, lastErr)
 }
 
-// AlignPatientDemographicsBackground performs demographic modification of a patient resource in the background.
-// It runs with a startup delay to avoid lock contention with active uploads, and retries safely using backoff.
-// Mutex serialization is used per patientID to prevent concurrent file conflicts in Orthanc.
-func AlignPatientDemographicsBackground(config *OrthancConfig, patientID, name, birthDate, sex string) {
-	// Obtain the mutex lock specifically for this patientID to serialize operations
+// findPatientStudies queries Orthanc's POST /tools/find to retrieve all Study UUIDs for a given PatientID.
+func findPatientStudies(config *OrthancConfig, patientID string) ([]string, error) {
+	url := fmt.Sprintf("%s/tools/find", config.BaseURL())
+	queryPayload := map[string]any{
+		"Level":  "Study",
+		"Expand": false,
+		"Query": map[string]string{
+			"PatientID": patientID,
+		},
+	}
+	bodyBytes, err := json.Marshal(queryPayload)
+	if err != nil {
+		return nil, err
+	}
+
+	maxRetries := 5
+	backoff := 1 * time.Second
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(bodyBytes), config)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := orthancHTTPClient.Do(req)
+		if err != nil {
+			lastErr = err
+			slog.Warn("findPatientStudies network error, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			slog.Warn("findPatientStudies failed to read body, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("find patient studies failed with status %d: %s", resp.StatusCode, string(respBody))
+			if resp.StatusCode >= 500 {
+				slog.Warn("findPatientStudies server error, retrying...", "status", resp.StatusCode, "attempt", attempt)
+				time.Sleep(backoff)
+				backoff *= 2
+				continue
+			}
+			return nil, lastErr
+		}
+
+		var studyUUIDs []string
+		if err := json.Unmarshal(respBody, &studyUUIDs); err != nil {
+			return nil, err
+		}
+		return studyUUIDs, nil
+	}
+
+	return nil, fmt.Errorf("failed to find patient studies after %d attempts: %w", maxRetries, lastErr)
+}
+
+// PreemptiveAlignPatientDemographics aligns existing patient demographics in Orthanc with EMR values before upload.
+// This prevents demographic mismatch and SQLite lock conflicts during subsequent uploads/modifications.
+func PreemptiveAlignPatientDemographics(config *OrthancConfig, patientID, name, birthDate, sex string) error {
+	// Obtain patient lock to serialize demographic changes for the same patient ID
 	lock := getPatientLock(patientID)
 	lock.Lock()
 	defer lock.Unlock()
 
-	// Wait 100ms for active database write transactions to stabilize.
-	time.Sleep(100 * time.Millisecond)
+	slog.Info("Pre-emptive demographic alignment check started", "patient_id", patientID, "name", name, "birth_date", birthDate, "sex", sex)
 
-	slog.Info("Background demographic alignment started", "patient_id", patientID, "name", name, "birth_date", birthDate, "sex", sex)
-
-	patientDetails, err := findPatientDetails(config, patientID)
+	// 1. Query current details in Orthanc
+	url := fmt.Sprintf("%s/tools/find", config.BaseURL())
+	queryPayload := map[string]any{
+		"Level":  "Patient",
+		"Expand": true,
+		"Query": map[string]string{
+			"PatientID": patientID,
+		},
+	}
+	bodyBytes, err := json.Marshal(queryPayload)
 	if err != nil {
-		slog.Error("Background demographic alignment failed: could not find patient details in Orthanc", "patient_id", patientID, "error", err)
-		return
+		return err
 	}
 
-	// If patient demographics already match our target demographics, skip the heavy modify operation!
+	req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(bodyBytes), config)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := orthancHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to query patient in Orthanc: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("patient query failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var results []PatientFindResult
+	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
+		return fmt.Errorf("failed to parse patient query response: %w", err)
+	}
+
+	// If the patient does not exist, there's nothing to align. The upcoming upload will create it cleanly.
+	if len(results) == 0 {
+		slog.Info("Pre-emptive demographic alignment skipped: patient does not exist in Orthanc yet", "patient_id", patientID)
+		return nil
+	}
+
+	patientDetails := results[0]
+
+	// 2. Check if demographics match
 	if patientDetails.MainDicomTags.PatientName == name &&
 		patientDetails.MainDicomTags.PatientBirthDate == birthDate &&
 		patientDetails.MainDicomTags.PatientSex == sex {
-		slog.Info("Background demographic alignment skipped: demographics already match target", "patient_id", patientID, "name", name)
-		return
+		slog.Info("Pre-emptive demographic alignment skipped: demographics already match target", "patient_id", patientID, "name", name)
+		return nil
 	}
 
-	maxAttempts := 5
-	backoff := 2 * time.Second
+	slog.Warn("Pre-emptive demographic mismatch detected! Aligning existing studies...",
+		"patient_id", patientID,
+		"current_name", patientDetails.MainDicomTags.PatientName, "target_name", name,
+		"current_birthdate", patientDetails.MainDicomTags.PatientBirthDate, "target_birthdate", birthDate,
+		"current_sex", patientDetails.MainDicomTags.PatientSex, "target_sex", sex,
+	)
 
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		err = modifyPatient(config, patientDetails.ID, name, birthDate, sex)
-		if err == nil {
-			slog.Info("Background demographic alignment completed successfully", "patient_id", patientID, "name", name)
-			return
+	// 3. Get all study UUIDs for this patient ID
+	studyUUIDs, err := findPatientStudies(config, patientID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch studies for alignment: %w", err)
+	}
+
+	if len(studyUUIDs) == 0 {
+		slog.Info("Pre-emptive demographic alignment skipped: patient exists but has no studies", "patient_id", patientID)
+		return nil
+	}
+
+	// 4. Modify each study asynchronously and wait for completion
+	replaceMap := map[string]string{
+		"PatientName":      name,
+		"PatientBirthDate": birthDate,
+	}
+	if sex != "" {
+		replaceMap["PatientSex"] = sex
+	}
+
+	payload := map[string]any{
+		"Replace":     replaceMap,
+		"Remove":      []string{},
+		"Keep":        []string{},
+		"KeepSource":  false,
+		"KeepLabels":  true,
+		"Force":       true,
+		"Synchronous": false,
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	for _, studyUUID := range studyUUIDs {
+		modifyURL := fmt.Sprintf("%s/studies/%s/modify", config.BaseURL(), studyUUID)
+
+		maxRetries := 5
+		backoff := 1 * time.Second
+		var lastModifyErr error
+		var jobResp JobResponse
+
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			modifyReq, err := newOrthancRequest(http.MethodPost, modifyURL, bytes.NewReader(payloadBytes), config)
+			if err != nil {
+				return err
+			}
+			modifyReq.Header.Set("Content-Type", "application/json")
+
+			modifyResp, err := orthancHTTPClient.Do(modifyReq)
+			if err != nil {
+				lastModifyErr = err
+				slog.Warn("study modify network error, retrying...", "study_uuid", studyUUID, "attempt", attempt, "error", err)
+				time.Sleep(backoff)
+				backoff *= 2
+				continue
+			}
+
+			respBody, err := io.ReadAll(modifyResp.Body)
+			modifyResp.Body.Close()
+			if err != nil {
+				lastModifyErr = err
+				slog.Warn("study modify failed to read body, retrying...", "study_uuid", studyUUID, "attempt", attempt, "error", err)
+				time.Sleep(backoff)
+				backoff *= 2
+				continue
+			}
+
+			if modifyResp.StatusCode != http.StatusOK {
+				lastModifyErr = fmt.Errorf("study modify failed with status %d: %s", modifyResp.StatusCode, string(respBody))
+				if modifyResp.StatusCode >= 500 {
+					slog.Warn("study modify server error, retrying...", "study_uuid", studyUUID, "attempt", attempt)
+					time.Sleep(backoff)
+					backoff *= 2
+					continue
+				}
+				return lastModifyErr
+			}
+
+			if err := json.Unmarshal(respBody, &jobResp); err != nil {
+				return fmt.Errorf("failed to parse study modify job response: %w", err)
+			}
+			lastModifyErr = nil
+			break
 		}
 
-		slog.Warn("Background demographic alignment retry", "patient_id", patientID, "attempt", attempt, "error", err)
-		time.Sleep(backoff)
-		backoff *= 2
+		if lastModifyErr != nil {
+			return fmt.Errorf("failed to modify study %s after 5 attempts: %w", studyUUID, lastModifyErr)
+		}
+
+		slog.Info("Pre-emptive study modify job created", "study_uuid", studyUUID, "job_id", jobResp.ID)
+		if err := waitForJobCompletion(config, jobResp.ID); err != nil {
+			return fmt.Errorf("pre-emptive study modify job %s failed: %w", jobResp.ID, err)
+		}
 	}
 
-	slog.Error("Background demographic alignment failed after maximum attempts", "patient_id", patientID, "error", err)
+	slog.Info("Pre-emptive demographic alignment completed successfully", "patient_id", patientID)
+	return nil
 }
+
 
