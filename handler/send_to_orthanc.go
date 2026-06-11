@@ -133,29 +133,9 @@ func HandleSendToOrthanc(w http.ResponseWriter, r *http.Request) {
 			// Cleanup files when the job finishes (even if it fails)
 			defer os.RemoveAll(tempDir)
 
-			// Extract demographics for pre-emptive alignment
-			var patientID, patientName, patientBirthDate, patientSex string
-			if modifyReq.Replace != nil {
-				if pid, ok := modifyReq.Replace["PatientID"].(string); ok {
-					patientID = pid
-				}
-				if name, ok := modifyReq.Replace["PatientName"].(string); ok {
-					patientName = name
-				}
-				if dob, ok := modifyReq.Replace["PatientBirthDate"].(string); ok {
-					patientBirthDate = dob
-				}
-				if sex, ok := modifyReq.Replace["PatientSex"].(string); ok {
-					patientSex = sex
-				}
-			}
 
-			// Pre-emptively align patient demographics in Orthanc if they mismatch
-			if patientID != "" {
-				if err := service.PreemptiveAlignPatientDemographics(&OrthancCfg, patientID, patientName, patientBirthDate, patientSex); err != nil {
-					return nil, fmt.Errorf("demographic alignment failed: %w", err)
-				}
-			}
+
+
 
 			outputFilePath := filepath.Join(tempDir, "output.dcm")
 

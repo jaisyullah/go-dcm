@@ -63,29 +63,9 @@ func HandleSendToOrthancFromURLs(w http.ResponseWriter, r *http.Request) {
 	service.EnqueueTask(service.Task{
 		JobID: jobID,
 		ExecuteFunc: func(ctx context.Context) (any, error) {
-			// Extract demographics for pre-emptive alignment
-			var patientID, patientName, patientBirthDate, patientSex string
-			if req.OrthancModify.Replace != nil {
-				if pid, ok := req.OrthancModify.Replace["PatientID"].(string); ok {
-					patientID = pid
-				}
-				if name, ok := req.OrthancModify.Replace["PatientName"].(string); ok {
-					patientName = name
-				}
-				if dob, ok := req.OrthancModify.Replace["PatientBirthDate"].(string); ok {
-					patientBirthDate = dob
-				}
-				if sex, ok := req.OrthancModify.Replace["PatientSex"].(string); ok {
-					patientSex = sex
-				}
-			}
 
-			// Pre-emptively align patient demographics in Orthanc if they mismatch
-			if patientID != "" {
-				if err := service.PreemptiveAlignPatientDemographics(&OrthancCfg, patientID, patientName, patientBirthDate, patientSex); err != nil {
-					return nil, fmt.Errorf("demographic alignment failed: %w", err)
-				}
-			}
+
+
 
 			// Convert parameters raw message to string
 			var paramsStr string
