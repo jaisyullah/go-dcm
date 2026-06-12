@@ -276,6 +276,7 @@ func ModifyStudy(config *OrthancConfig, studyID string, modifyReq *OrthancModify
 			}
 
 			// For all server (5xx) and client (4xx) errors, fail immediately to prevent study duplication under SQLite locks
+			cleanupDuplicateStudyOnFailure(config, studyID, modifyReq)
 			return nil, lastErr
 		}
 
@@ -283,7 +284,147 @@ func ModifyStudy(config *OrthancConfig, studyID string, modifyReq *OrthancModify
 		return json.RawMessage(respBody), nil
 	}
 
+	cleanupDuplicateStudyOnFailure(config, studyID, modifyReq)
 	return nil, fmt.Errorf("failed after %d modify attempts: %w", maxRetries, lastErr)
+}
+
+// DeleteStudy removes a study from Orthanc via DELETE /studies/{id}.
+// Used for rollback when modification fails or cleanup of duplicate/failed studies.
+func DeleteStudy(config *OrthancConfig, studyID string) error {
+	if !config.IsConfigured() {
+		return fmt.Errorf("orthanc is not configured")
+	}
+
+	url := fmt.Sprintf("%s/studies/%s", config.BaseURL(), studyID)
+
+	req, err := newOrthancRequest(http.MethodDelete, url, nil, config)
+	if err != nil {
+		return fmt.Errorf("failed to create delete request: %w", err)
+	}
+
+	slog.Info("deleting study from Orthanc", "study_id", studyID)
+
+	resp, err := orthancHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to delete study from Orthanc: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Orthanc delete study failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	slog.Info("study deleted from Orthanc successfully", "study_id", studyID)
+	return nil
+}
+
+// FindStudyIDByUID queries Orthanc's POST /tools/find to retrieve a Study's internal ID by its StudyInstanceUID.
+func FindStudyIDByUID(config *OrthancConfig, studyUID string) (string, error) {
+	if !config.IsConfigured() {
+		return "", fmt.Errorf("orthanc is not configured")
+	}
+
+	url := fmt.Sprintf("%s/tools/find", config.BaseURL())
+	queryPayload := map[string]any{
+		"Level":  "Study",
+		"Expand": false,
+		"Query": map[string]string{
+			"StudyInstanceUID": studyUID,
+		},
+	}
+	bodyBytes, err := json.Marshal(queryPayload)
+	if err != nil {
+		return "", err
+	}
+
+	maxRetries := 5
+	backoff := 1 * time.Second
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(bodyBytes), config)
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := orthancHTTPClient.Do(req)
+		if err != nil {
+			lastErr = err
+			slog.Warn("FindStudyIDByUID network error, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			slog.Warn("FindStudyIDByUID failed to read body, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("find study by UID failed with status %d: %s", resp.StatusCode, string(respBody))
+			if resp.StatusCode >= 500 {
+				slog.Warn("FindStudyIDByUID server error, retrying...", "status", resp.StatusCode, "attempt", attempt)
+				time.Sleep(backoff)
+				backoff *= 2
+				continue
+			}
+			return "", lastErr
+		}
+
+		var studyUUIDs []string
+		if err := json.Unmarshal(respBody, &studyUUIDs); err != nil {
+			return "", err
+		}
+		if len(studyUUIDs) == 0 {
+			return "", fmt.Errorf("study not found by UID: %s", studyUID)
+		}
+		return studyUUIDs[0], nil
+	}
+
+	return "", fmt.Errorf("failed to find study by UID after %d attempts: %w", maxRetries, lastErr)
+}
+
+// cleanupDuplicateStudyOnFailure checks if a target study was partially/fully created during a failed modify job and deletes it.
+// It ensures that the original study is safe and not deleted.
+func cleanupDuplicateStudyOnFailure(config *OrthancConfig, originalStudyID string, modifyReq *OrthancModifyRequest) {
+	if modifyReq == nil || modifyReq.Replace == nil {
+		return
+	}
+
+	targetStudyUID, ok := modifyReq.Replace["StudyInstanceUID"].(string)
+	if !ok || targetStudyUID == "" {
+		return
+	}
+
+	slog.Warn("ModifyStudy failed; checking for orphaned/duplicate study in Orthanc to clean up...", "target_uid", targetStudyUID)
+
+	// Look up if a study exists with the target StudyInstanceUID
+	targetStudyID, err := FindStudyIDByUID(config, targetStudyUID)
+	if err != nil {
+		slog.Info("No orphaned/duplicate study found to clean up", "target_uid", targetStudyUID, "error", err.Error())
+		return
+	}
+
+	// Double-check to ensure we NEVER delete the original study!
+	if targetStudyID == originalStudyID {
+		slog.Info("Target study ID matches original study ID. Skipping cleanup to keep the original study safe.", "study_id", originalStudyID)
+		return
+	}
+
+	slog.Warn("Found orphaned/duplicate study from failed modify, deleting it to prevent pollution...", "target_study_id", targetStudyID, "original_study_id", originalStudyID)
+	if err := DeleteStudy(config, targetStudyID); err != nil {
+		slog.Error("Failed to delete orphaned/duplicate study during rollback", "target_study_id", targetStudyID, "error", err)
+	} else {
+		slog.Info("Successfully cleaned up orphaned/duplicate study in Orthanc", "target_study_id", targetStudyID)
+	}
 }
 
 // DeleteInstance removes an instance from Orthanc via DELETE /instances/{id}.
