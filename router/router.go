@@ -47,6 +47,14 @@ func SetupRouter() *chi.Mux {
 
 		// Proxy modify requests through gateway
 		r.Post("/studies/{id}/modify", handler.HandleModifyStudy)
+
+		// Study search proxies
+		r.Post("/studies/find-by-acsn", handler.HandleFindStudyByAccession)
+		r.Post("/patients/{id}/studies", handler.HandleFindPatientStudies)
+		r.Post("/studies/{id}/send-to-modality/{ae}", handler.HandleSendStudyToModality)
+
+		// Orchestration (composite operations)
+		r.Post("/orchestrate/upload-and-send", handler.HandleOrchestrateUploadAndSend)
 	})
 
 	return r

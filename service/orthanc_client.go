@@ -1153,3 +1153,180 @@ func PreemptiveAlignPatientDemographics(config *OrthancConfig, patientID, name, 
 }
 
 
+
+// =============================================================================
+// Study search utilities (used by the Java SIMRS front-end via Go API proxy)
+// =============================================================================
+
+// FindStudyByAccession queries Orthanc for a study matching the given AccessionNumber.
+// Returns the Orthanc internal study ID, or empty string if not found.
+func FindStudyByAccession(config *OrthancConfig, accessionNumber string) (string, error) {
+	if !config.IsConfigured() {
+		return "", fmt.Errorf("orthanc is not configured")
+	}
+
+	url := fmt.Sprintf("%s/tools/find", config.BaseURL())
+	queryPayload := map[string]any{
+		"Level":  "Study",
+		"Expand": true,
+		"Query": map[string]string{
+			"AccessionNumber": accessionNumber,
+		},
+	}
+	bodyBytes, err := json.Marshal(queryPayload)
+	if err != nil {
+		return "", err
+	}
+
+	maxRetries := 3
+	backoff := 500 * time.Millisecond
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(bodyBytes), config)
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := orthancHTTPClient.Do(req)
+		if err != nil {
+			slog.Warn("FindStudyByAccession network error, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			slog.Warn("FindStudyByAccession read error, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("find by ACSN failed with status %d: %s", resp.StatusCode, string(respBody))
+		}
+
+		var results []struct {
+			ID string `json:"ID"`
+		}
+		if err := json.Unmarshal(respBody, &results); err != nil {
+			return "", err
+		}
+		if len(results) > 0 {
+			return results[0].ID, nil
+		}
+		return "", nil // not found (not an error)
+	}
+
+	return "", fmt.Errorf("failed to find study by ACSN after %d attempts: %w", maxRetries, err)
+}
+
+// FindAllPatientStudies queries Orthanc for ALL studies belonging to a PatientID (no date/modality filter).
+// Returns the full expanded study list as a json.RawMessage for the Java proxy.
+func FindAllPatientStudies(config *OrthancConfig, patientID string) (json.RawMessage, error) {
+	if !config.IsConfigured() {
+		return nil, fmt.Errorf("orthanc is not configured")
+	}
+
+	url := fmt.Sprintf("%s/tools/find", config.BaseURL())
+	queryPayload := map[string]any{
+		"Level":  "Study",
+		"Expand": true,
+		"Query": map[string]string{
+			"PatientID": patientID,
+		},
+	}
+	bodyBytes, err := json.Marshal(queryPayload)
+	if err != nil {
+		return nil, err
+	}
+
+	maxRetries := 3
+	backoff := 500 * time.Millisecond
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(bodyBytes), config)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := orthancHTTPClient.Do(req)
+		if err != nil {
+			slog.Warn("FindAllPatientStudies network error, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			slog.Warn("FindAllPatientStudies read error, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("find all patient studies failed with status %d: %s", resp.StatusCode, string(respBody))
+		}
+
+		return json.RawMessage(respBody), nil
+	}
+
+	return nil, fmt.Errorf("failed to find patient studies after %d attempts: %w", maxRetries, err)
+}
+
+// SendStudyToModality sends a study from Orthanc to a DICOM modality/AE Title.
+// Wraps POST /modalities/{aeTitle}/store
+func SendStudyToModality(config *OrthancConfig, studyID string, aeTitle string) error {
+	if !config.IsConfigured() {
+		return fmt.Errorf("orthanc is not configured")
+	}
+
+	url := fmt.Sprintf("%s/modalities/%s/store", config.BaseURL(), aeTitle)
+	payload := []string{studyID}
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	maxRetries := 3
+	backoff := 1 * time.Second
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err := newOrthancRequest(http.MethodPost, url, bytes.NewReader(bodyBytes), config)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := orthancHTTPClient.Do(req)
+		if err != nil {
+			slog.Warn("SendStudyToModality network error, retrying...", "attempt", attempt, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr := fmt.Errorf("send to modality failed with status %d: %s", resp.StatusCode, string(respBody))
+			if attempt < maxRetries {
+				slog.Warn("SendStudyToModality failed, retrying...", "attempt", attempt, "error", lastErr)
+				time.Sleep(backoff)
+				backoff *= 2
+				continue
+			}
+			return lastErr
+		}
+
+		slog.Info("Study sent to modality successfully", "study_id", studyID, "ae_title", aeTitle)
+		return nil
+	}
+
+	return fmt.Errorf("failed to send study to modality after %d attempts", maxRetries)
+}

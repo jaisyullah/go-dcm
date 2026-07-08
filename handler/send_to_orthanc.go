@@ -151,15 +151,10 @@ func HandleSendToOrthanc(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Step 3: Modify study tags
-			// Strip patient demographics from Replace payload because they were already embedded
-			// in the DICOM instances during conversion. This avoids triggering demographic mismatch (400)
-			// and patient-level modify (500) errors in Orthanc under SQLite locks.
-			if modifyReq.Replace != nil {
-				delete(modifyReq.Replace, "PatientName")
-				delete(modifyReq.Replace, "PatientBirthDate")
-				delete(modifyReq.Replace, "PatientSex")
-				delete(modifyReq.Replace, "PatientID")
-			}
+			// NOTE: Demographic/clinical tags (PatientName, PatientID, etc.) are now
+			// embedded during conversion (via --key flags), not sent in orthanc_modify.
+			// KeepSource=true avoids study duplication.
+			// Stripping is no longer needed — Java caller no longer includes these tags.
 
 			modifyResp, err := service.ModifyStudy(&OrthancCfg, uploadResp.ParentStudy, &modifyReq)
 			if err != nil {
