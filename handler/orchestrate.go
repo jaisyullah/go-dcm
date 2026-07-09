@@ -142,7 +142,6 @@ func executeOrchestration(ctx context.Context, req *OrchestrateUploadAndSendRequ
 		defer os.RemoveAll(tempDir)
 
 		httpClient := &http.Client{Timeout: 60 * time.Second}
-		var uploadedIDs []string
 
 		for idx, urlStr := range req.URLs {
 			filename := fmt.Sprintf("image_%d.jpg", idx)
@@ -231,7 +230,15 @@ func executeOrchestration(ctx context.Context, req *OrchestrateUploadAndSendRequ
 		delete(req.OrthancModify.Replace, "PatientSex")
 		delete(req.OrthancModify.Replace, "PatientID")
 	}
-
+	// Merge TargetAccessionNumber into Replace so a single
+	// ModifyStudy (KeepSource=false) handles metadata and ACSN together,
+	// avoiding orphan studies from sequential KeepSource=false calls.
+	if req.TargetAccessionNumber != "" {
+		if req.OrthancModify.Replace == nil {
+			req.OrthancModify.Replace = make(map[string]any)
+		}
+		req.OrthancModify.Replace["AccessionNumber"] = req.TargetAccessionNumber
+	}
 	modifyResp, err := service.ModifyStudy(&OrthancCfg, studyID, &req.OrthancModify)
 	if err != nil {
 		if isNewUpload {
@@ -241,22 +248,7 @@ func executeOrchestration(ctx context.Context, req *OrchestrateUploadAndSendRequ
 		return nil, fmt.Errorf("orthanc modify failed: %w", err)
 	}
 
-	// PHASE 3: Auto-correct ACSN if target provided
-	if req.TargetAccessionNumber != "" {
-		slog.InfoContext(ctx, "Phase 3: Setting AccessionNumber", "study_id", studyID, "acsn", req.TargetAccessionNumber)
-		modifyACSN := service.OrthancModifyRequest{
-			Replace: map[string]any{
-				"AccessionNumber": req.TargetAccessionNumber,
-			},
-			KeepSource: false,
-			Force:      true,
-		}
-		_, err := service.ModifyStudy(&OrthancCfg, studyID, &modifyACSN)
-		if err != nil {
-			// Non-fatal — ACSN can be set later
-			slog.WarnContext(ctx, "Phase 3: Failed to set AccessionNumber (non-fatal)", "error", err)
-		}
-	}
+	// PHASE 3: (removed — ACSN now merged into Phase 2 above)
 
 	// PHASE 4: Send to DICOM router
 	sendOK := false
@@ -316,7 +308,7 @@ func notifyCallback(url string, result *OrchestrationResult, jobID string) {
 		slog.Warn("callback request failed", "url", url, "error", err)
 		return
 	}
-	defer resp.Body.Close()
+	resp.Body.Close()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		slog.Info("callback succeeded", "url", url, "status", resp.StatusCode)
 	} else {

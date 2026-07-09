@@ -109,9 +109,8 @@ func HandleSendToOrthancFromURLs(w http.ResponseWriter, r *http.Request) {
 					rollbackUploadedInstances(uploadedInstanceIDs)
 					return nil, fmt.Errorf("failed to download %s: %w", urlStr, err)
 				}
-				defer resp.Body.Close()
-
 				if resp.StatusCode != http.StatusOK {
+					resp.Body.Close()
 					rollbackUploadedInstances(uploadedInstanceIDs)
 					return nil, fmt.Errorf("download URL %s returned status %d", urlStr, resp.StatusCode)
 				}
@@ -119,16 +118,19 @@ func HandleSendToOrthancFromURLs(w http.ResponseWriter, r *http.Request) {
 				inputFilePath := filepath.Join(tempDir, fmt.Sprintf("%d_%s", idx, service.SanitizeFilename(filename)))
 				out, err := os.Create(inputFilePath)
 				if err != nil {
+					resp.Body.Close()
 					rollbackUploadedInstances(uploadedInstanceIDs)
 					return nil, fmt.Errorf("failed to create temp file for %s: %w", filename, err)
 				}
 
 				if _, err := io.Copy(out, resp.Body); err != nil {
 					out.Close()
+					resp.Body.Close()
 					rollbackUploadedInstances(uploadedInstanceIDs)
 					return nil, fmt.Errorf("failed to save download %s: %w", filename, err)
 				}
 				out.Close()
+				resp.Body.Close()
 
 				outputFilePath := filepath.Join(tempDir, fmt.Sprintf("output_%d.dcm", idx))
 
@@ -154,9 +156,15 @@ func HandleSendToOrthancFromURLs(w http.ResponseWriter, r *http.Request) {
 
 			// Step 3: Modify study tags
 			if parentStudyID != "" {
-				// NOTE: Demographic/clinical tags are now embedded during conversion (--key flags),
-				// not sent in orthanc_modify. KeepSource=true avoids study duplication.
-				// Stripping no longer needed — Java caller no longer includes these tags.
+				// NOTE: Demographic/clinical tags are embedded during conversion (--key flags),
+				// Strip from orthanc_modify.Replace to prevent Orthanc 400 if Java caller
+				// includes them in both places.
+				if req.OrthancModify.Replace != nil {
+					delete(req.OrthancModify.Replace, "PatientName")
+					delete(req.OrthancModify.Replace, "PatientID")
+					delete(req.OrthancModify.Replace, "PatientBirthDate")
+					delete(req.OrthancModify.Replace, "PatientSex")
+				}
 
 				modifyResp, err := service.ModifyStudy(&OrthancCfg, parentStudyID, &req.OrthancModify)
 				if err != nil {

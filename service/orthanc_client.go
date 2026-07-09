@@ -648,13 +648,14 @@ func waitForJobCompletion(config *OrthancConfig, jobID string) error {
 			if err != nil {
 				continue
 			}
-			defer resp.Body.Close()
 
 			if resp.StatusCode != http.StatusOK {
+				resp.Body.Close()
 				continue
 			}
 
 			bodyBytes, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
 			if err != nil {
 				continue
 			}
