@@ -1,37 +1,67 @@
 package service
 
 import (
+	"bytes"
+	"context"
 	"fmt"
-	"os"
+	"log/slog"
 	"os/exec"
+	"time"
 )
 
-// RunDCMTK executes a DCMTK command line utility
-// tool: name of the executable (e.g. "img2dcm", "dcmencap")
-// inputFile: path to input file (e.g., uploaded jpg or pdf)
-// outputFile: path to resulting dicom file
-// args: additional arguments parsed from request
-func RunDCMTK(tool string, inputFile string, outputFile string, extraArgs []string) error {
-	// Construct the command
-	// For example: img2dcm.exe [options] inputFile outputFile
+// DefaultTimeout is the default command execution timeout.
+const DefaultTimeout = 60 * time.Second
+
+// RunDCMTK executes a DCMTK command line utility with context propagation.
+// Note: It now accepts the request/job context!
+func RunDCMTK(ctx context.Context, tool string, inputFile string, outputFile string, extraArgs []string) error {
+	// Use the provided context. If the job times out or is cancelled,
+	// Go automatically sends SIGKILL to the OS process.
 	var cmdArgs []string
-	
-	// Add extra arguments first
 	cmdArgs = append(cmdArgs, extraArgs...)
-	
-	// Final arguments are input file and output file
-	// Some tools like dcmencap (pdf2dcm) have same format: dcmencap [options] docfile-in dcmfile-out
 	cmdArgs = append(cmdArgs, inputFile, outputFile)
-	
-	cmd := exec.Command(tool, cmdArgs...)
-	
-	// Capture output for debugging
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	
+
+	cmd := exec.CommandContext(ctx, tool, cmdArgs...)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	slog.InfoContext(ctx, "executing DCMTK command",
+		"tool", tool,
+		"input", inputFile,
+	)
+
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to run %s: %w", tool, err)
+		// Check if cancellation caused the error
+		if ctx.Err() != nil {
+			slog.ErrorContext(ctx, "DCMTK command cancelled or timed out",
+				"tool", tool,
+				"reason", ctx.Err().Error(),
+			)
+			return fmt.Errorf("%s execution cancelled: %w", tool, ctx.Err())
+		}
+
+		slog.ErrorContext(ctx, "DCMTK command failed",
+			"tool", tool,
+			"error", err.Error(),
+			"stderr", stderr.String(),
+		)
+		return fmt.Errorf("failed to run %s: %w — stderr: %s", tool, err, stderr.String())
 	}
-	
+
+	slog.InfoContext(ctx, "DCMTK command completed successfully",
+		"tool", tool,
+	)
+
+	return nil
+}
+
+// CheckToolAvailable verifies a DCMTK tool is accessible on the system PATH.
+func CheckToolAvailable(tool string) error {
+	_, err := exec.LookPath(tool)
+	if err != nil {
+		return fmt.Errorf("%s not found in PATH: %w", tool, err)
+	}
 	return nil
 }

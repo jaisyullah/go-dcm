@@ -1,0 +1,52 @@
+services:
+  dicom-converter-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dicom-converter-api
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - MAX_IMAGE_UPLOAD_MB=100
+      - MAX_PDF_UPLOAD_MB=200
+      - MAX_CDA_UPLOAD_MB=100
+      - MAX_STL_UPLOAD_MB=200
+      # Orthanc connection — point to the compose orthanc service
+      - ORTHANC_URL=http://orthanc
+      - ORTHANC_PORT=8042
+      - ORTHANC_USER=orthanc
+      - ORTHANC_PASS=orthanc
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - dcm-net
+
+  # Orthanc DICOM server for integration testing
+  orthanc:
+    image: orthancteam/orthanc:26.4.2
+    container_name: orthanc
+    ports:
+      - "8042:8042"   # Web UI & REST API
+      - "4242:4242"   # DICOM port
+    environment:
+      - ORTHANC__DICOM_AET=ORTHANC
+      - ORTHANC__DICOM_PORT=4242
+      - ORTHANC__REGISTERED_USERS={"orthanc":"orthanc"}
+    volumes:
+      - orthanc-data:/var/lib/orthanc/db
+    restart: unless-stopped
+    networks:
+      - dcm-net
+
+networks:
+  dcm-net:
+    driver: bridge
+
+volumes:
+  orthanc-data:

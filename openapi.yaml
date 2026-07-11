@@ -1,87 +1,323 @@
 openapi: 3.0.3
 info:
-  title: go-dcm DICOM Conversion API
-  description: API for converting images and documents to DICOM wrappers using underlying DCMTK commands (`img2dcm` and `dcmencap/pdf2dcm`).
-  version: 1.0.0
+  title: dicom-converter-api DICOM Conversion API
+  description: |
+    REST API for converting images and documents to DICOM (.dcm) format
+    using DCMTK command-line tools. Supports JPEG, PNG, BMP images,
+    PDF documents, CDA clinical documents, and STL 3D models.
+  version: 2.0.0
+  contact:
+    name: dicom-converter-api
+    url: https://github.com/malifnasrulloh/dicom-converter-api
+
 servers:
   - url: http://localhost:8080
-    description: Local Server
+    description: Local development server
+
+tags:
+  - name: health
+    description: Health check endpoints
+  - name: convert
+    description: DICOM conversion endpoints
+
 paths:
+  /health:
+    get:
+      tags: [health]
+      summary: Health check
+      description: Returns server status and DCMTK tool availability.
+      operationId: getHealth
+      responses:
+        "200":
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: healthy
+                version: dev
+                dependencies:
+                  img2dcm: available
+                  pdf2dcm: available
+                  cda2dcm: available
+                  stl2dcm: available
+                  dcmdump: available
+                  go_version: go1.25.0
+        "503":
+          description: Server is degraded (some tools unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
   /api/v1/convert/img2dcm:
     post:
-      summary: Convert Image to DICOM
-      description: Captures JPEG or BMP files along with optional parameters to bridge with DCMTK `img2dcm`.
+      tags: [convert]
+      summary: Convert image to DICOM
+      description: |
+        Converts JPEG, BMP, or PNG images to DICOM format using DCMTK img2dcm.
+        PNG images are automatically converted to lossless BMP before processing.
+        
+        Mandatory DICOM tags (Modality, StudyDate, ContentDate) are auto-injected
+        if not provided in the keys array.
+      operationId: img2dcm
       requestBody:
         required: true
         content:
           multipart/form-data:
             schema:
               type: object
+              required: [file]
               properties:
                 file:
                   type: string
                   format: binary
-                  description: The JPEG or BMP image file to be converted.
+                  description: JPEG, BMP, or PNG image file
                 parameters:
                   type: string
                   description: |
-                    JSON payload representing conversion configurations.
-                    Example:
+                    JSON string with conversion parameters.
+                    
+                    Available fields:
+                    - `output_sop_class`: "sec-capture" (default), "new-sc", "vl-photo", "oph-photo"
+                    - `input_format`: "JPEG" (default), "BMP" (auto-detected for PNG)
+                    - `keys`: array of "TagName=Value" strings
+                    - Various img2dcm flags (see schema)
+                  example: |
                     {
-                      "output_sop_class": "vl-photo",
-                      "patient_name": "Test^Patient",
+                      "output_sop_class": "sec-capture",
                       "keys": [
-                        "PatientName=Test^Patient"
+                        "PatientName=Doe^John",
+                        "PatientID=12345",
+                        "Modality=XC",
+                        "AccessionNumber=ACC001"
                       ]
                     }
       responses:
-        '200':
-          description: Successful Operation
+        "200":
+          description: DICOM file generated successfully
           content:
             application/dicom:
               schema:
                 type: string
                 format: binary
-        '400':
-          description: Bad Request (Invalid Form or JSON Parameters)
-        '500':
-          description: Conversion Error
+          headers:
+            Content-Disposition:
+              description: Suggested filename for the DICOM file
+              schema:
+                type: string
+                example: 'attachment; filename="ACC001.dcm"'
+        "400":
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missing_file:
+                  summary: Missing file
+                  value:
+                    error: "Missing 'file' field in form data"
+                    code: MISSING_FILE
+                invalid_type:
+                  summary: Unsupported file type
+                  value:
+                    error: "unsupported file extension '.gif', allowed: .jpg, .jpeg, .bmp, .png"
+                    code: INVALID_FILE_TYPE
+                    details: "Supported formats: JPEG, BMP, PNG"
+        "500":
+          description: Conversion error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/v1/convert/pdf2dcm:
     post:
-      summary: Convert PDF/Document to DICOM
-      description: Captures PDF, CDA, STL, MTL, or OBJ documents to be encapsulated into a DICOM file crossing DCMTK `dcmencap` (pdf2dcm).
+      tags: [convert]
+      summary: Convert PDF to DICOM
+      description: |
+        Encapsulates a PDF document into DICOM format (Encapsulated PDF Storage)
+        using DCMTK pdf2dcm. Validates that the uploaded file is a genuine PDF.
+      operationId: pdf2dcm
       requestBody:
         required: true
         content:
           multipart/form-data:
             schema:
               type: object
+              required: [file]
               properties:
                 file:
                   type: string
                   format: binary
-                  description: The PDF or Document File to be encapsulated.
+                  description: PDF document file
                 parameters:
                   type: string
                   description: |
-                    JSON payload containing specific patient, layout, and document identification configurations.
-                    Example:
+                    JSON string with conversion parameters.
+                  example: |
                     {
-                      "filetype": "pdf",
-                      "title": "Clinical PDF Report",
+                      "title": "Lab Report",
                       "patient_name": "Doe^John",
-                      "patient_id": "89392",
-                      "generate_uids": true
+                      "patient_id": "12345",
+                      "patient_birthdate": "19900101",
+                      "patient_sex": "M",
+                      "generate_uids": true,
+                      "keys": [
+                        "AccessionNumber=ACC002",
+                        "Manufacturer=Hospital_Name"
+                      ]
                     }
       responses:
-        '200':
-          description: Successful Encapsulation
+        "200":
+          description: DICOM file generated successfully
           content:
             application/dicom:
               schema:
                 type: string
                 format: binary
-        '400':
-          description: Bad Request (Invalid Form or JSON Parameters)
-        '500':
-          description: Conversion Error
+        "400":
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Conversion error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/convert/cda2dcm:
+    post:
+      tags: [convert]
+      summary: Convert CDA to DICOM
+      description: |
+        Encapsulates a Clinical Document Architecture (CDA) XML document
+        into DICOM format using DCMTK cda2dcm.
+      operationId: cda2dcm
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: CDA/XML document file (.xml, .cda, .html)
+                parameters:
+                  type: string
+                  description: JSON string with conversion parameters (same structure as pdf2dcm)
+      responses:
+        "200":
+          description: DICOM file generated successfully
+          content:
+            application/dicom:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Conversion error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/convert/stl2dcm:
+    post:
+      tags: [convert]
+      summary: Convert STL to DICOM
+      description: |
+        Encapsulates a 3D STL model into DICOM format using DCMTK stl2dcm.
+      operationId: stl2dcm
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: STL 3D model file
+                parameters:
+                  type: string
+                  description: JSON string with conversion parameters (same structure as pdf2dcm)
+      responses:
+        "200":
+          description: DICOM file generated successfully
+          content:
+            application/dicom:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Conversion error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded]
+          description: Overall server status
+        version:
+          type: string
+          description: Application version
+        dependencies:
+          type: object
+          additionalProperties:
+            type: string
+          description: Status of each dependency
+
+    ErrorResponse:
+      type: object
+      required: [error, code]
+      properties:
+        error:
+          type: string
+          description: Human-readable error message
+        code:
+          type: string
+          description: Machine-readable error code
+          enum:
+            - INVALID_FORM
+            - MISSING_FILE
+            - INVALID_FILE_TYPE
+            - INVALID_PARAMS
+            - INVALID_KEY_FORMAT
+            - INVALID_PDF
+            - PNG_CONVERSION_ERROR
+            - CONVERSION_FAILED
+            - TEMP_DIR_ERROR
+            - FILE_SAVE_ERROR
+            - FILE_WRITE_ERROR
+        details:
+          type: string
+          description: Additional error details
