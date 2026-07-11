@@ -76,6 +76,12 @@ var orthancHTTPClient = &http.Client{
 	Timeout: 120 * time.Second,
 }
 
+// modifyHTTPClient is a dedicated HTTP client for study/patient modify operations
+// which can be slower on SQLite-backed Orthanc instances (especially with large studies).
+var modifyHTTPClient = &http.Client{
+	Timeout: 300 * time.Second,
+}
+
 // newOrthancRequest creates an HTTP request with optional Basic Auth.
 func newOrthancRequest(method, url string, body io.Reader, config *OrthancConfig) (*http.Request, error) {
 	req, err := http.NewRequest(method, url, body)
@@ -199,7 +205,7 @@ func ModifyStudy(config *OrthancConfig, studyID string, modifyReq *OrthancModify
 			"replace_tag_count", len(modifyReq.Replace),
 		)
 
-		resp, err := orthancHTTPClient.Do(req)
+		resp, err := modifyHTTPClient.Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("failed to send modify request to Orthanc: %w", err)
 			slog.Warn("Orthanc modify failed with network error, retrying...", "attempt", attempt, "error", err)
@@ -690,7 +696,7 @@ func modifyPatient(config *OrthancConfig, patientInternalID string, name, birthD
 	}
 	payload := map[string]any{
 		"Replace":      replace,
-		"KeepSource":   false,
+		"KeepSource":   true,
 		"Force":        true,
 		"Asynchronous": true,
 	}
@@ -710,7 +716,7 @@ func modifyPatient(config *OrthancConfig, patientInternalID string, name, birthD
 		}
 		req.Header.Set("Content-Type", "application/json")
 
-		resp, err := orthancHTTPClient.Do(req)
+		resp, err := modifyHTTPClient.Do(req)
 		if err != nil {
 			lastErr = err
 			slog.Warn("modifyPatient network error, retrying...", "attempt", attempt, "error", err)
@@ -1077,7 +1083,7 @@ func PreemptiveAlignPatientDemographics(config *OrthancConfig, patientID, name, 
 		"Replace":     replaceMap,
 		"Remove":      []string{},
 		"Keep":        []string{},
-		"KeepSource":  false,
+		"KeepSource":  true,
 		"KeepLabels":  true,
 		"Force":       true,
 		"Synchronous": false,
@@ -1102,7 +1108,7 @@ func PreemptiveAlignPatientDemographics(config *OrthancConfig, patientID, name, 
 			}
 			modifyReq.Header.Set("Content-Type", "application/json")
 
-			modifyResp, err := orthancHTTPClient.Do(modifyReq)
+			modifyResp, err := modifyHTTPClient.Do(modifyReq)
 			if err != nil {
 				lastModifyErr = err
 				slog.Warn("study modify network error, retrying...", "study_uuid", studyUUID, "attempt", attempt, "error", err)

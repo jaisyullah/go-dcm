@@ -86,8 +86,8 @@ func HandleOrchestrateUploadAndSend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// KeepSource=false for metadata-only modify — no demographic in payload
-	req.OrthancModify.KeepSource = false
+	// KeepSource=true for in-place modify — no study copy, ID stays the same
+	req.OrthancModify.KeepSource = true
 	req.OrthancModify.Force = true
 
 	// Create background job
@@ -262,13 +262,8 @@ func executeOrchestration(ctx context.Context, req *OrchestrateUploadAndSendRequ
 		}
 	}
 
-	// PHASE 5: Re-resolve study ID if ACSN changed (KeepSource:false creates new study)
+	// KeepSource=true: study ID is unchanged, no re-resolve needed
 	finalStudyID := studyID
-	if req.TargetAccessionNumber != "" {
-		if newID, err := service.FindStudyByAccession(&OrthancCfg, req.TargetAccessionNumber); err == nil && newID != "" {
-			finalStudyID = newID
-		}
-	}
 
 	result := &OrchestrationResult{
 		StudyID:          finalStudyID,
