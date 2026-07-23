@@ -30,6 +30,7 @@ paths:
                     {
                       "output_sop_class": "vl-photo",
                       "patient_name": "Test^Patient",
+                      "encounter_id": "12345-abcde-67890",
                       "keys": [
                         "PatientName=Test^Patient",
                         "Modality=DOC"
@@ -72,6 +73,7 @@ paths:
                       "title": "Clinical PDF Report",
                       "patient_name": "Doe^John",
                       "patient_id": "89392",
+                      "encounter_id": "12345-abcde-67890",
                       "generate_uids": true,
                       "keys": [
                         "Modality=DOC"

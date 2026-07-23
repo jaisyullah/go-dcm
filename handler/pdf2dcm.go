@@ -35,6 +35,7 @@ type Pdf2DcmRequest struct {
 	AnnotationNo     bool     `json:"annotation_no,omitempty"`      // --annotation-no
 	Override         bool     `json:"override,omitempty"`           // --override
 	Keys             []string `json:"keys,omitempty"`               // --key
+	EncounterID      string   `json:"encounter_id,omitempty"`      // --key 0038,0010
 }
 
 func (req *Pdf2DcmRequest) ToArgs() []string {
@@ -103,6 +104,9 @@ func (req *Pdf2DcmRequest) ToArgs() []string {
 	}
 	for _, key := range req.Keys {
 		args = append(args, "--key", key)
+	}
+	if req.EncounterID != "" {
+		args = append(args, "--key", "0038,0010="+req.EncounterID)
 	}
 
 	return args

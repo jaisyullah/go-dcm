@@ -34,6 +34,7 @@ type Img2DcmRequest struct {
 	GroupLengthCreate bool    `json:"group_length_create,omitempty"` // --group-length-create
 	LengthUndefined  bool     `json:"length_undefined,omitempty"`  // --length-undefined
 	PaddingOff       bool     `json:"padding_off,omitempty"`       // --padding-off
+	EncounterID      string   `json:"encounter_id,omitempty"`      // --key 0038,0010
 }
 
 func (req *Img2DcmRequest) ToArgs() []string {
@@ -85,6 +86,9 @@ func (req *Img2DcmRequest) ToArgs() []string {
 	}
 	for _, key := range req.Keys {
 		args = append(args, "--key", key)
+	}
+	if req.EncounterID != "" {
+		args = append(args, "--key", "0038,0010="+req.EncounterID)
 	}
 	
 	switch req.OutputSopClass {

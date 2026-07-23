@@ -39,6 +39,7 @@ Sertakan File JPEG/BMP pada form \`file\`, dan berikan text di form \`parameters
 ```json
 {
   "output_sop_class": "vl-photo",
+  "encounter_id": "12345-abcde-67890",
   "keys": [
     "PatientName=Doe^John",
     "PatientID=123456789",
@@ -65,6 +66,7 @@ Sertakan Dokumen PDF pada form \`file\`, dan berikan text di form \`parameters\`
   "patient_sex": "M",
   "manufacturer": "NAMA_RS/KLINIK",
   "manufacturer_model": "Sistem Informasi Rekam Medis",
+  "encounter_id": "12345-abcde-67890",
   "generate_uids": true,
   "keys": [
     "AccessionNumber=ACC002",
