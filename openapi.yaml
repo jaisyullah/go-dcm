@@ -31,7 +31,8 @@ paths:
                       "output_sop_class": "vl-photo",
                       "patient_name": "Test^Patient",
                       "keys": [
-                        "PatientName=Test^Patient"
+                        "PatientName=Test^Patient",
+                        "Modality=DOC"
                       ]
                     }
       responses:
@@ -71,7 +72,10 @@ paths:
                       "title": "Clinical PDF Report",
                       "patient_name": "Doe^John",
                       "patient_id": "89392",
-                      "generate_uids": true
+                      "generate_uids": true,
+                      "keys": [
+                        "Modality=DOC"
+                      ]
                     }
       responses:
         '200':

@@ -48,7 +48,7 @@ Sertakan File JPEG/BMP pada form \`file\`, dan berikan text di form \`parameters
     "SeriesInstanceUID=1.2.3.4.5.6.7.1",
     "StudyDate=20240420",
     "AccessionNumber=ACC001",
-    "Modality=XC"
+    "Modality=DOC"
   ]
 }
 ```
