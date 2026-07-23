@@ -68,7 +68,8 @@ Sertakan Dokumen PDF pada form \`file\`, dan berikan text di form \`parameters\`
   "generate_uids": true,
   "keys": [
     "AccessionNumber=ACC002",
-    "StudyDate=20240420"
+    "StudyDate=20240420",
+    "Modality=DOC"
   ]
 }
 ```
